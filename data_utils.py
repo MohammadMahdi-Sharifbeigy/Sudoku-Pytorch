@@ -155,7 +155,7 @@ def generate_empty_cells(num_samples=3000):
             torch.from_numpy(y_train), torch.from_numpy(y_val), torch.from_numpy(y_test))
 
 def load_mnist_images():
-    mnist_save_path = './data/MNIST'
+    mnist_save_path = './data'
     os.makedirs(mnist_save_path, exist_ok=True)
 
     mnist_train = datasets.MNIST(root=mnist_save_path, train=True, download=True)
@@ -180,7 +180,6 @@ def load_mnist_images():
     x_val = np.expand_dims(x_val / 255.0, 1)
     x_test = np.expand_dims(x_test / 255.0, 1)
 
-    # دقت کنید: ما دیگر y_train - 1 را انجام نمی‌دهیم تا لیبل‌ها 1 تا 9 باقی بمانند
     return (torch.from_numpy(x_train), torch.from_numpy(x_val), torch.from_numpy(x_test),
             torch.from_numpy(y_train).long(), torch.from_numpy(y_val).long(), torch.from_numpy(y_test).long())
 
@@ -216,7 +215,6 @@ def get_font_image_dict(data_path, excluded_names=None):
 
 def load_font_image_arrays(image_dict):
     x = np.concatenate([v for v in image_dict.values()], axis=0)
-    # لیبل‌ها دقیقاً همان مقادیر 1 تا 9 را خواهند داشت
     y = np.array([np.repeat(k, len(image_dict[k])) for k in image_dict])
     y = np.reshape(y, (-1, 1))
     

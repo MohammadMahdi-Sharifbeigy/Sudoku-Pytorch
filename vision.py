@@ -136,8 +136,6 @@ def locate_cells_within_grid(grid_img):
                 cell_image = grid_img_thresh[min(y_px):max(y_px)+1, min(x_px):max(x_px)+1]
                 
                 digit_is_present, cell_image = check_for_digit_in_cell_image(cell_image, area_threshold=5, apply_border=True)
-                cell_image = cv2.erode(cell_image, np.ones((3, 3), np.uint8), iterations=1)
-                
                 cell_image = center_and_resize_digit(cell_image) if digit_is_present else np.zeros((28, 28), dtype=np.uint8)
                 
                 moments = cv2.moments(contour)
@@ -196,11 +194,11 @@ def get_predicted_sudoku_grid_torch(model, cells, device):
     
     if len(digit_images) == 0: return np.zeros((9, 9), dtype=int)
 
-    tensor_images = torch.from_numpy(digit_images).float().unsqueeze(1).to(device)
+    tensor_images = torch.from_numpy(digit_images).float().unsqueeze(1).div(255.0).to(device)
 
     with torch.no_grad():
         outputs = model(tensor_images)
-        pred_labels = torch.argmax(outputs, dim=1).cpu().numpy() + 1
+        pred_labels = torch.argmax(outputs, dim=1).cpu().numpy()  # labels are already 1-9, no +1 needed
 
     indices = np.where([cell['contains_digit'] for cell in cells])[0]
     grid_array = np.zeros(81, dtype=int)
