@@ -9,7 +9,7 @@ venv/
 env/
 
 # PyTorch model checkpoints and generated reports
-models/
+models/inference_report.txt
 
 # Jupyter
 .ipynb_checkpoints/
