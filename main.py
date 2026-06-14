@@ -27,6 +27,7 @@ from vision import (
 from train import train_epoch, validate, collect_predictions
 from data_utils import get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all
 from report_utils import save_training_report, save_inference_report
+from optimize_model import run_optimization_and_benchmark
 
 # --- UI Configuration ---
 st.set_page_config(
@@ -53,7 +54,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # --- Sidebar Navigation ---
 st.sidebar.header("Navigation")
-app_mode = st.sidebar.radio("Select Mode:", ["Inference (Solve)", "Model Training"])
+app_mode = st.sidebar.radio("Select Mode:", ["Inference (Solve)", "Model Training", "Model Optimization"])
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Compute Device:** `{device}`")
 
@@ -450,3 +451,44 @@ elif app_mode == "Model Training":
             import traceback
             st.error(f"Training Error: {e}")
             st.code(traceback.format_exc())
+
+# ==========================================
+# MODE 3: MODEL OPTIMIZATION
+# ==========================================
+elif app_mode == "Model Optimization":
+    import time
+    
+    st.markdown("### Model Optimization & Benchmarking")
+    st.markdown("Convert the trained PyTorch model to ONNX and TorchScript, and compare CPU inference latency and model sizes.")
+    
+    model_path = 'models/best_model.pt'
+    if not os.path.exists(model_path):
+        st.error(f"Trained model not found at `{model_path}`. Please train the model first.")
+    else:
+        # Load the base model
+        base_model = DigitCNN(num_classes=10)
+        # Always evaluate CPU inference for benchmarking
+        cpu_device = torch.device('cpu') 
+        base_model.load_state_dict(torch.load(model_path, map_location=cpu_device))
+        base_model.to(cpu_device)
+        base_model.eval()
+        
+        st.info("Loaded PyTorch base model successfully.")
+        
+        if st.button("Run Optimization & Benchmark"):
+            with st.spinner("Optimizing and benchmarking..."):
+                results = run_optimization_and_benchmark(base_model, model_path, cpu_device)
+                
+                if results[-1]["Inference Latency (ms)"] == "N/A":
+                    st.warning("ONNX Runtime not installed. ONNX inference benchmark skipped. Install with `pip install onnxruntime`.")
+                
+                st.success("Optimization and Benchmarking complete!")
+                
+                df_results = pd.DataFrame(results)
+                st.dataframe(df_results, use_container_width=True)
+                
+                st.markdown("### Deployment Instructions")
+                st.markdown("""
+                - **TorchScript**: Use `torch.jit.load('models/best_model.ts')` to run the model in C++ or lightweight environments without needing the original model class code.
+                - **ONNX**: Use `onnxruntime.InferenceSession('models/best_model.onnx')` for fast, cross-platform inference that can be deployed to web, mobile, or specialized hardware.
+                """)
