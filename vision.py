@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import imutils
+from sklearn.cluster import KMeans
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -47,8 +48,20 @@ def get_quadrilateral_points_in_order(approx_arr):
                      approx_arr[br_idx], approx_arr[bl_idx]])
 
 
-def perform_four_point_transform(input_img, src_corners, pad=10):
+def perform_four_point_transform(input_img, src_corners, pad=10, size=None):
+    """
+    Warp the quadrilateral defined by src_corners to a top-down view.
+
+    size=None : aspect-preserving warp (max_w x max_h) — original behaviour.
+    size=int  : square warp to (size x size). Use this for the grid so cells
+                can be sliced deterministically into a perfect 9x9.
+    """
     src = get_quadrilateral_points_in_order(src_corners).astype('float32')
+    if size is not None:
+        dst = np.array([[0, 0], [size-1, 0],
+                        [size-1, size-1], [0, size-1]], dtype='float32')
+        M = cv2.getPerspectiveTransform(src, dst)
+        return M, cv2.warpPerspective(input_img, M, (size, size))
     tl, tr, br, bl = src
     max_w = max(int(np.linalg.norm(br - bl)), int(np.linalg.norm(tr - tl)))
     max_h = max(int(np.linalg.norm(tl - bl)), int(np.linalg.norm(tr - br)))
@@ -163,6 +176,11 @@ def find_grid_contour_candidates(img):
 
     for blocksize, c_val in [(41, 8), (21, 5), (61, 10), (31, 6), (11, 3), (81, 12)]:
         thresh = apply_grayscale_blur_and_threshold(img, blocksize=blocksize, c=c_val)
+
+        # Close gaps in thin / broken (e.g. hand-drawn) grid lines so the outer
+        # boundary forms a single closed contour.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
 
         for retr in [cv2.RETR_EXTERNAL, cv2.RETR_LIST]:
             contours = imutils.grab_contours(
@@ -304,29 +322,182 @@ def sort_cells_into_grid(cells):
     return sorted(cells, key=lambda c: (c['grid_row'], c['grid_col']))
 
 
-def get_valid_cells_from_image(img):
-    """Full pipeline: detect grid boundary → warp → extract 81 cells."""
-    M_matrices, warped_images, _ = find_grid_contour_candidates(img)
+def _clear_border_components(binary):
+    """
+    Remove connected white components that touch the image border.
+
+    In a sliced grid cell the digit sits near the centre while leftover grid
+    lines run along the edges; dropping border-touching components removes the
+    lines without harming a centred digit. Returns a new binary image.
+    """
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    h, w = binary.shape[:2]
+    out = np.zeros_like(binary)
+    for lbl in range(1, n):  # 0 = background
+        x, y, bw, bh, _ = stats[lbl]
+        touches = x <= 0 or y <= 0 or (x + bw) >= w or (y + bh) >= h
+        if not touches:
+            out[labels == lbl] = 255
+    return out
+
+
+def slice_grid_into_cells(grid_img, n=9, pad_frac=0.02):
+    """
+    Deterministic fallback: split a square perspective-corrected grid into an
+    exact n x n lattice. Always returns n*n cells in row-major order — no
+    contour detection, so it survives faint / wavy / hand-drawn grid lines
+    that defeat locate_cells_within_grid.
+
+    pad_frac trims each cell inward to drop the surrounding grid lines before
+    digit detection.
+    """
+    H, W = grid_img.shape[:2]
+    ch, cw = H / float(n), W / float(n)
+    cells = []
+    for r in range(n):
+        for c in range(n):
+            y0, y1 = int(round(r * ch)), int(round((r + 1) * ch))
+            x0, x1 = int(round(c * cw)), int(round((c + 1) * cw))
+            cell = grid_img[y0:y1, x0:x1]
+
+            py = max(1, int(pad_frac * cell.shape[0]))
+            px = max(1, int(pad_frac * cell.shape[1]))
+            inner = cell[py:-py, px:-px]
+            if inner.size == 0:
+                inner = cell
+
+            thr = apply_grayscale_blur_and_threshold(
+                inner, method="mean", blocksize=31, c=7)
+            thr = _clear_border_components(thr)
+            has_digit, thr = check_for_digit_in_cell_image(
+                thr, area_threshold=4, apply_border=False)
+            cell_img = center_and_resize_digit(thr) if has_digit \
+                else np.zeros((28, 28), dtype=np.uint8)
+
+            cells.append({
+                'img':            cell_img,
+                'contains_digit': has_digit,
+                'grid_row':       r,
+                'grid_col':       c,
+                'x_centroid':     int((c + 0.5) * cw),
+                'y_centroid':     int((r + 0.5) * ch),
+            })
+    return cells
+
+
+def build_grid_from_partial_cells(cells, n=9):
+    """
+    Map an unordered set of detected cells onto an exact n x n grid.
+
+    locate_cells_within_grid usually finds *most* but not all 81 cells on a
+    printed grid (e.g. 75-78). The old pipeline discarded that result whenever
+    it was not exactly 81 and fell back to deterministic slicing, which loses
+    digits when the warp is slightly skewed. Instead, cluster the detected
+    cell centroids into n row-bands and n column-bands (1-D KMeans per axis),
+    place each cell in its (row, col) slot, and fill any empty slot with a
+    blank cell. This keeps every digit the contour detector already found.
+
+    Requires at least n detected cells (KMeans needs >= n samples per axis).
+    Returns a row-major list of exactly n*n cell dicts, or None if clustering
+    is not possible.
+    """
+    if len(cells) < n:
+        return None
+
+    xs = np.array([c['x_centroid'] for c in cells], dtype=np.float32).reshape(-1, 1)
+    ys = np.array([c['y_centroid'] for c in cells], dtype=np.float32).reshape(-1, 1)
+
+    kx = KMeans(n_clusters=n, n_init=10, random_state=0).fit(xs)
+    ky = KMeans(n_clusters=n, n_init=10, random_state=0).fit(ys)
+
+    col_centers = kx.cluster_centers_.ravel()
+    row_centers = ky.cluster_centers_.ravel()
+    col_rank = {lbl: rank for rank, lbl in enumerate(np.argsort(col_centers))}
+    row_rank = {lbl: rank for rank, lbl in enumerate(np.argsort(row_centers))}
+    col_sorted = col_centers[np.argsort(col_centers)]
+    row_sorted = row_centers[np.argsort(row_centers)]
+
+    # Place cells into slots; on collision prefer the cell that has a digit.
+    slots = {}
+    for i, c in enumerate(cells):
+        r = row_rank[ky.labels_[i]]
+        col = col_rank[kx.labels_[i]]
+        key = (r, col)
+        if key not in slots or (c['contains_digit'] and not slots[key]['contains_digit']):
+            slots[key] = c
+
+    out = []
+    for r in range(n):
+        for col in range(n):
+            if (r, col) in slots:
+                cell = dict(slots[(r, col)])
+                cell['grid_row'] = r
+                cell['grid_col'] = col
+            else:
+                cell = {
+                    'img':            np.zeros((28, 28), dtype=np.uint8),
+                    'contains_digit': False,
+                    'grid_row':       r,
+                    'grid_col':       col,
+                    'x_centroid':     int(col_sorted[col]),
+                    'y_centroid':     int(row_sorted[r]),
+                }
+            out.append(cell)
+    return out
+
+
+def get_valid_cells_from_image(img, grid_size=576):
+    """
+    Full pipeline: detect grid boundary -> warp -> extract 81 cells.
+
+    Strategy:
+      1. Contour path: for each candidate grid, try locate_cells_within_grid.
+         Return immediately if exactly 81 cells are detected.
+      2. Partial-grid recovery: if the best candidate found most (but not all)
+         cells, cluster their centroids into a 9x9 lattice and fill the gaps.
+         This preserves every digit the contour detector found instead of
+         throwing the whole result away.
+      3. Slice fallback: if too few cells were found (faint / wavy / hand-drawn
+         grids), square-warp the best candidate and slice a deterministic 9x9.
+    """
+    M_matrices, warped_images, contour_list = find_grid_contour_candidates(img)
     if not warped_images:
         raise Exception(
             "No grid boundary detected. Make sure the Sudoku grid is clearly "
             "visible and fills most of the image."
         )
 
-    best_result = None
+    # ── 1. Contour path ──────────────────────────────────────────────────
+    # Track the best candidate (most cells) for recovery / fallback.
+    best = None  # (n_cells, cells, M, grid_image, contour)
     for i, grid_image in enumerate(warped_images):
         cells = locate_cells_within_grid(grid_image)
         if len(cells) == 81:
             return sort_cells_into_grid(cells), M_matrices[i], grid_image
-        # Track best partial result
-        if best_result is None or len(cells) > len(best_result[0]):
-            best_result = (cells, M_matrices[i], grid_image)
+        if best is None or len(cells) > best[0]:
+            best = (len(cells), cells, M_matrices[i], grid_image, contour_list[i])
 
-    n_found = len(best_result[0]) if best_result else 0
-    raise Exception(
-        f"Unable to find 81 cells — best result was {n_found} cells. "
-        "Try better lighting or a more overhead angle."
-    )
+    # ── 2. Partial-grid recovery ─────────────────────────────────────────
+    # 54 = two-thirds of 81: enough detected cells that centroid clustering
+    # reliably reconstructs the 9x9 layout.
+    best_n, best_cells, best_M, best_grid, best_contour = best
+    if best_n >= 54:
+        recovered = build_grid_from_partial_cells(best_cells)
+        if recovered is not None:
+            return recovered, best_M, best_grid
+
+    # ── 3. Slice fallback ────────────────────────────────────────────────
+    # Re-warp the best grid candidate to a square so it slices into an exact
+    # 9x9. A fresh M is required because the square warp differs from the
+    # aspect-preserving warp used above (generate_solution_image unwarps with it).
+    perimeter = cv2.arcLength(best_contour, True)
+    approx    = cv2.approxPolyDP(best_contour, 0.03 * perimeter, True)
+    pts = (np.squeeze(approx, axis=1).astype(np.float32)
+           if len(approx) == 4 else _contour_to_quad(best_contour))
+
+    M_sq, grid_sq = perform_four_point_transform(img, pts, size=grid_size)
+    cells = slice_grid_into_cells(grid_sq)
+    return cells, M_sq, grid_sq
 
 
 # ─────────────────────────────────────────────────────────────────────────────

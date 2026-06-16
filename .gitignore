@@ -9,7 +9,7 @@ venv/
 env/
 
 # PyTorch model checkpoints and generated reports
-models/inference_report.txt
+models/reports/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -24,3 +24,6 @@ Thumbs.db
 
 # Streamlit
 .streamlit/
+
+#codegrapg
+.codegraph/

@@ -143,7 +143,7 @@ if app_mode == "Inference (Solve)":
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("#### Original Image")
-            st.image(img, use_container_width=True)
+            st.image(img, width='stretch')
 
         with st.spinner('Processing image and extracting grid...'):
             try:
@@ -154,12 +154,12 @@ if app_mode == "Inference (Solve)":
                     thresh = apply_grayscale_blur_and_threshold(img, blocksize=41, c=8)
                     with step_col1:
                         st.markdown("**1. Adaptive Thresholding**")
-                        st.image(thresh, use_container_width=True, channels="GRAY")
+                        st.image(thresh, width='stretch', channels="GRAY")
 
                     cells, M, board_image = get_valid_cells_from_image(img)
                     with step_col2:
                         st.markdown("**2. Perspective Transform**")
-                        st.image(board_image, use_container_width=True, channels="GRAY")
+                        st.image(board_image, width='stretch', channels="GRAY")
 
                     with step_col3:
                         st.markdown("**3. Cell Extraction**")
@@ -237,7 +237,7 @@ if app_mode == "Inference (Solve)":
                     per_cell_info=per_cell,
                     grid_array=grid_array,
                     solved_board=solved_board,
-                    output_path='models/inference_report.txt',
+                    output_path=f'models/reports/inference_report_{uploaded_file.name}.txt',
                 )
                 st.sidebar.success(f"📄 Inference report saved to `{inf_report_path}`")
 
@@ -249,14 +249,14 @@ if app_mode == "Inference (Solve)":
 
                     with col2:
                         st.markdown("#### Solved Sudoku")
-                        st.image(final_image, use_container_width=True)
+                        st.image(final_image, width='stretch')
                         st.success("Sudoku solved successfully!")
 
                     st.markdown("### Digital Representation")
                     matrix_df = pd.DataFrame(solved_board)
                     st.dataframe(
                         matrix_df.style.set_properties(**{'text-align': 'center', 'font-weight': 'bold'}),
-                        use_container_width=True
+                        width='stretch'
                     )
 
                     # Inline download button for inference report
@@ -270,7 +270,7 @@ if app_mode == "Inference (Solve)":
                 else:
                     st.error("The extracted grid is invalid or unsolvable. Please ensure the image is clear and well-lit.")
                     st.markdown("**Extracted Grid (before solving):**")
-                    st.dataframe(pd.DataFrame(grid_array), use_container_width=True)
+                    st.dataframe(pd.DataFrame(grid_array), width='stretch')
 
             except Exception as e:
                 import traceback
@@ -301,7 +301,7 @@ elif app_mode == "Model Training":
         help="Font images from data/digit_images are critical for recognizing printed/typed Sudoku digits."
     )
 
-    if st.button("Start Training Sequence", use_container_width=True):
+    if st.button("Start Training Sequence", width='stretch'):
         if not os.path.exists(data_path):
             st.error(f"Dataset path `{data_path}` does not exist. Please verify the path.")
             st.stop()
@@ -419,7 +419,7 @@ elif app_mode == "Model Training":
                     'Accuracy (%)': [f"{a:.1f}" for a in per_class_acc]
                 })
                 st.markdown("#### Per-Class Accuracy")
-                st.dataframe(acc_df.set_index('Class'), use_container_width=True)
+                st.dataframe(acc_df.set_index('Class'), width='stretch')
 
             # --- Save training text report ---
             train_report_path = save_training_report(
@@ -485,7 +485,7 @@ elif app_mode == "Model Optimization":
                 st.success("Optimization and Benchmarking complete!")
                 
                 df_results = pd.DataFrame(results)
-                st.dataframe(df_results, use_container_width=True)
+                st.dataframe(df_results, width='stretch')
                 
                 st.markdown("### Deployment Instructions")
                 st.markdown("""
