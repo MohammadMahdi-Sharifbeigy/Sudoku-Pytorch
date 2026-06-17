@@ -1,36 +1,188 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Frontend — Next.js 16 + TypeScript
 
-## Getting Started
+Dark-techy UI for the Sudoku AI solver. Built with Next.js 16 App Router, TypeScript, Tailwind CSS v4, shadcn/ui, and recharts.
 
-First, run the development server:
+---
+
+## Requirements
+
+- Node.js 20+
+- npm (or pnpm / bun)
+- Backend running at `http://localhost:8000` (see `../backend/README.md`)
+
+---
+
+## Setup
+
+```bash
+cd frontend
+
+# Install dependencies
+npm install
+
+# Copy environment file
+cp .env.local.example .env.local
+```
+
+---
+
+## Environment Variables
+
+`.env.local`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Backend API base URL |
+
+---
+
+## Running
+
+### Development
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Production Build
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+npm start
+```
 
-## Learn More
+### Type Check
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npx tsc --noEmit
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Lint
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run lint
+```
 
-## Deploy on Vercel
+### Docker
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+# From repo root
+docker-compose up frontend
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+## Pages
+
+| Route | Description |
+|-------|-------------|
+| `/` | Landing page — project overview, feature highlights |
+| `/solve` | Upload a Sudoku image, view solved grid + cell analysis |
+| `/train` | Live training dashboard with real-time loss/accuracy charts |
+| `/optimize` | Model benchmark panel — export TorchScript/ONNX, compare inference speeds |
+
+---
+
+## Solve Page (`/solve`)
+
+- Drag-and-drop or click to upload a JPEG/PNG (max 10 MB)
+- Animated loading steps: Detecting grid → Extracting cells → Running CNN → Solving puzzle
+- Three result tabs:
+  - **Solution** — overlay image with solved digits
+  - **Cell Analysis** — 9×9 grid with per-cell confidence bars and extracted images
+  - **Raw Grid** — original detected digits; low-confidence cells highlighted in amber
+
+---
+
+## Train Page (`/train`)
+
+- Config panel: epochs (1–100), learning rate, batch size, dataset selector
+- Connects to `GET /api/train/stream` via EventSource (SSE)
+- Auto-reconnect on drop (max 3 retries, exponential backoff)
+- Live recharts:
+  - Loss chart (cyan = train, amber = val)
+  - Accuracy chart (cyan = train, amber = val)
+- Results section: metric cards, 10×10 confusion matrix, per-class accuracy table
+- Download training report button
+
+---
+
+## Optimize Page (`/optimize`)
+
+- Triggers `POST /api/optimize` to export TorchScript + ONNX
+- Displays benchmark comparison (PyTorch vs TorchScript vs ONNX inference speed)
+- Download buttons for each model format
+
+---
+
+## Project Structure
+
+```
+frontend/
+├── app/
+│   ├── layout.tsx         # Root layout, fonts, Toaster
+│   ├── globals.css        # Design tokens, dot-grid pattern, keyframes
+│   ├── page.tsx           # Landing page
+│   ├── solve/page.tsx     # Inference UI
+│   ├── train/page.tsx     # Training dashboard
+│   ├── optimize/page.tsx  # Benchmark panel
+│   └── not-found.tsx      # 404 page
+├── components/
+│   ├── layout/
+│   │   ├── Navbar.tsx
+│   │   └── Shell.tsx
+│   ├── ui/
+│   │   ├── SudokuBoard.tsx
+│   │   ├── ConfidenceBadge.tsx
+│   │   ├── StatCard.tsx
+│   │   └── CodeBlock.tsx
+│   └── charts/
+│       ├── LossAccuracyChart.tsx
+│       └── ConfusionMatrix.tsx
+├── hooks/
+│   └── useTrainingStream.ts
+├── lib/
+│   └── api.ts             # Typed API client with AbortController support
+├── .env.local.example
+└── package.json
+```
+
+---
+
+## Design System
+
+Theme: **Dark Techy** — neural terminal meets geometric puzzle.
+
+| Token | Value |
+|-------|-------|
+| Background | `#0A0A0F` |
+| Surface | `#12121A` |
+| Border | `#1E1E2E` |
+| Cyan (primary) | `#00D4FF` |
+| Amber (secondary) | `#FFB800` |
+| Error | `#FF4560` |
+| Success | `#00E396` |
+| Heading font | Space Mono |
+| Body font | Inter |
+
+Confidence color scale:
+- ≥ 80% → `#00E396` (green)
+- 50–79% → `#FFB800` (amber)
+- < 50% → `#FF4560` (red)
+
+---
+
+## Key Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `next` | 16.2.9 | App framework |
+| `react` | 19.2.4 | UI runtime |
+| `recharts` | 3.8.1 | Training charts |
+| `react-dropzone` | 15.x | File upload |
+| `sonner` | 2.x | Toast notifications |
+| `tailwindcss` | 4.x | Styling |
+| `shadcn` | 4.x | Component primitives |
+| `lucide-react` | 1.x | Icons |
