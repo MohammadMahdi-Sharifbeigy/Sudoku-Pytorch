@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from fastapi import APIRouter, Query, Request, HTTPException
 from fastapi.responses import FileResponse
@@ -23,9 +24,10 @@ _ALLOWED_REPORT_EXT = ".txt"
 
 
 def _safe_filename(name: str) -> bool:
-    """Reject any filename containing path traversal components or separators."""
+    """Reject path traversal, separators, null bytes, and absolute paths."""
     return (
         len(name) > 0
+        and "\x00" not in name
         and ".." not in name
         and "/" not in name
         and "\\" not in name
@@ -67,18 +69,18 @@ async def download_report(filename: str, request: Request) -> FileResponse:
         )
 
     models_dir: str = request.app.state.models_dir
-    file_path = os.path.realpath(os.path.join(models_dir, filename))
-    base_dir = os.path.realpath(models_dir)
+    resolved = Path(models_dir).resolve() / filename
+    base = Path(models_dir).resolve()
 
-    # Double-check resolved path stays inside models_dir.
-    if not file_path.startswith(base_dir + os.sep) and file_path != base_dir:
+    # pathlib.is_relative_to avoids the startswith substring collision bug.
+    if not resolved.is_relative_to(base):
         raise HTTPException(status_code=400, detail="Invalid filename.")
 
-    if not os.path.isfile(file_path):
+    if not resolved.is_file():
         raise HTTPException(status_code=404, detail=f"Report '{filename}' not found.")
 
     return FileResponse(
-        path=file_path,
+        path=str(resolved),
         media_type="text/plain",
         filename=filename,
     )
