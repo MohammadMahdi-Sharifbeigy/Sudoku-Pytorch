@@ -8,23 +8,25 @@ Pipeline:
 
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 import imutils
 from sklearn.cluster import KMeans
+from typing import Optional
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Basic image helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def resize_and_maintain_aspect_ratio(input_image, new_width):
+def resize_and_maintain_aspect_ratio(input_image: np.ndarray, new_width: int) -> np.ndarray:
     ratio = new_width / float(input_image.shape[1])
     new_height = int(input_image.shape[0] * ratio)
     return cv2.resize(input_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
 
 
-def apply_grayscale_blur_and_threshold(img, method="mean", blocksize=91, c=7):
+def apply_grayscale_blur_and_threshold(
+    img: np.ndarray, method: str = "mean", blocksize: int = 91, c: int = 7
+) -> np.ndarray:
     """Accepts RGB 3-channel or single-channel grayscale input."""
     blurred = cv2.GaussianBlur(img, (3, 3), 0)
     gray = cv2.cvtColor(blurred, cv2.COLOR_RGB2GRAY) if len(blurred.shape) == 3 else blurred
@@ -33,7 +35,7 @@ def apply_grayscale_blur_and_threshold(img, method="mean", blocksize=91, c=7):
     return cv2.bitwise_not(thresh)
 
 
-def get_quadrilateral_points_in_order(approx_arr):
+def get_quadrilateral_points_in_order(approx_arr: np.ndarray) -> np.ndarray:
     if approx_arr.shape == (4, 1, 2):
         approx_arr = np.squeeze(approx_arr, axis=1)
     max_x = int(1.1 * np.max(approx_arr[:, 0]))
@@ -48,7 +50,12 @@ def get_quadrilateral_points_in_order(approx_arr):
                      approx_arr[br_idx], approx_arr[bl_idx]])
 
 
-def perform_four_point_transform(input_img, src_corners, pad=10, size=None):
+def perform_four_point_transform(
+    input_img: np.ndarray,
+    src_corners: np.ndarray,
+    pad: int = 10,
+    size: Optional[int] = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Warp the quadrilateral defined by src_corners to a top-down view.
 
@@ -72,7 +79,7 @@ def perform_four_point_transform(input_img, src_corners, pad=10, size=None):
     return M, warped
 
 
-def center_and_resize_digit(cell_img):
+def center_and_resize_digit(cell_img: np.ndarray) -> np.ndarray:
     contours, _ = cv2.findContours(cell_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return cv2.resize(cell_img, (28, 28), interpolation=cv2.INTER_AREA)
@@ -90,7 +97,9 @@ def center_and_resize_digit(cell_img):
     return canvas
 
 
-def check_for_digit_in_cell_image(img, area_threshold=5, apply_border=False):
+def check_for_digit_in_cell_image(
+    img: np.ndarray, area_threshold: float = 5, apply_border: bool = False
+) -> tuple[bool, np.ndarray]:
     cell = img.copy()
     if apply_border:
         bf = 0.07
@@ -110,7 +119,7 @@ def check_for_digit_in_cell_image(img, area_threshold=5, apply_border=False):
 # NMS utilities
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _bbox_iou(b1, b2):
+def _bbox_iou(b1: tuple[int, int, int, int], b2: tuple[int, int, int, int]) -> float:
     """Intersection-over-Union for two (x, y, w, h) boxes."""
     x1, y1, w1, h1 = b1
     x2, y2, w2, h2 = b2
@@ -122,7 +131,7 @@ def _bbox_iou(b1, b2):
     return inter / max(w1*h1 + w2*h2 - inter, 1)
 
 
-def _nms(candidates, iou_threshold=0.3):
+def _nms(candidates: list, iou_threshold: float = 0.3) -> list:
     """
     Non-Maximum Suppression.
     Input : list of (score, bbox=(x,y,w,h), payload)
@@ -146,7 +155,7 @@ def _nms(candidates, iou_threshold=0.3):
 # Quad helper
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _contour_to_quad(contour):
+def _contour_to_quad(contour: np.ndarray) -> np.ndarray:
     """Reduce any contour to 4 corners via convex-hull extreme points."""
     hull = cv2.convexHull(contour)[:, 0, :]
     tl = hull[np.argmin( hull[:, 0] + hull[:, 1])]
@@ -160,7 +169,9 @@ def _contour_to_quad(contour):
 # Grid boundary detection
 # ─────────────────────────────────────────────────────────────────────────────
 
-def find_grid_contour_candidates(img):
+def find_grid_contour_candidates(
+    img: np.ndarray,
+) -> tuple[Optional[list], Optional[list], Optional[list]]:
     """
     Detect the Sudoku grid boundary using contours across multiple threshold
     parameter combinations. NMS removes duplicate candidates from different params.
@@ -177,8 +188,6 @@ def find_grid_contour_candidates(img):
     for blocksize, c_val in [(41, 8), (21, 5), (61, 10), (31, 6), (11, 3), (81, 12)]:
         thresh = apply_grayscale_blur_and_threshold(img, blocksize=blocksize, c=c_val)
 
-        # Close gaps in thin / broken (e.g. hand-drawn) grid lines so the outer
-        # boundary forms a single closed contour.
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
 
@@ -210,7 +219,6 @@ def find_grid_contour_candidates(img):
 
                 all_candidates.append((score, (x, y, w, h), pts, contour))
 
-    # NMS: suppress grid candidates that overlap significantly
     nms_in = [(s, b, (p, c)) for s, b, p, c in all_candidates]
     kept   = _nms(nms_in, iou_threshold=0.5)
 
@@ -232,7 +240,7 @@ def find_grid_contour_candidates(img):
 # Cell extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def locate_cells_within_grid(grid_img):
+def locate_cells_within_grid(grid_img: np.ndarray) -> list[dict]:
     """
     Find 81 cells inside a perspective-corrected grid image.
 
@@ -244,9 +252,9 @@ def locate_cells_within_grid(grid_img):
         4. Apply NMS (IoU > 0.3) to remove duplicate / overlapping detections.
         5. Keep the result with the most cells; stop early when 81 are found.
     """
-    grid_area         = grid_img.shape[0] * grid_img.shape[1]
+    grid_area          = grid_img.shape[0] * grid_img.shape[1]
     expected_cell_area = grid_area / 81.0
-    best_cells        = []
+    best_cells: list[dict] = []
 
     for blocksize, c_val in [(91, 7), (51, 5), (71, 9), (31, 4), (111, 10), (41, 6)]:
         thresh = apply_grayscale_blur_and_threshold(
@@ -270,7 +278,6 @@ def locate_cells_within_grid(grid_img):
 
             x, y, w, h = cv2.boundingRect(contour)
 
-            # Composite quality score
             squareness      = min(w, h) / max(max(w, h), 1)
             area_regularity = 1.0 / (1.0 + abs(area / max(expected_cell_area, 1) - 1.0))
             fill            = area / max(w * h, 1)
@@ -278,11 +285,9 @@ def locate_cells_within_grid(grid_img):
 
             candidates.append((score, (x, y, w, h), contour))
 
-        # Suppress overlapping cell detections
         kept = _nms(candidates, iou_threshold=0.3)
 
-        # Extract each kept cell
-        valid_cells = []
+        valid_cells: list[dict] = []
         for score, bbox, contour in kept:
             mask = np.zeros(thresh.shape, dtype=np.uint8)
             cv2.drawContours(mask, [contour], 0, 255, cv2.FILLED)
@@ -297,10 +302,10 @@ def locate_cells_within_grid(grid_img):
             if moments['m00'] == 0:
                 continue
             valid_cells.append({
-                'img':          cell_img,
+                'img':            cell_img,
                 'contains_digit': has_digit,
-                'x_centroid':   int(moments['m10'] / moments['m00']),
-                'y_centroid':   int(moments['m01'] / moments['m00']),
+                'x_centroid':     int(moments['m10'] / moments['m00']),
+                'y_centroid':     int(moments['m01'] / moments['m00']),
             })
 
         if len(valid_cells) > len(best_cells):
@@ -311,7 +316,7 @@ def locate_cells_within_grid(grid_img):
     return best_cells
 
 
-def sort_cells_into_grid(cells):
+def sort_cells_into_grid(cells: list[dict]) -> list[dict]:
     max_x  = max(c['x_centroid'] for c in cells)
     max_y  = max(c['y_centroid'] for c in cells)
     cell_w = (max_x * 1.1) / 9.0
@@ -322,7 +327,7 @@ def sort_cells_into_grid(cells):
     return sorted(cells, key=lambda c: (c['grid_row'], c['grid_col']))
 
 
-def _clear_border_components(binary):
+def _clear_border_components(binary: np.ndarray) -> np.ndarray:
     """
     Remove connected white components that touch the image border.
 
@@ -341,7 +346,7 @@ def _clear_border_components(binary):
     return out
 
 
-def slice_grid_into_cells(grid_img, n=9, pad_frac=0.02):
+def slice_grid_into_cells(grid_img: np.ndarray, n: int = 9, pad_frac: float = 0.02) -> list[dict]:
     """
     Deterministic fallback: split a square perspective-corrected grid into an
     exact n x n lattice. Always returns n*n cells in row-major order — no
@@ -353,7 +358,7 @@ def slice_grid_into_cells(grid_img, n=9, pad_frac=0.02):
     """
     H, W = grid_img.shape[:2]
     ch, cw = H / float(n), W / float(n)
-    cells = []
+    cells: list[dict] = []
     for r in range(n):
         for c in range(n):
             y0, y1 = int(round(r * ch)), int(round((r + 1) * ch))
@@ -385,7 +390,7 @@ def slice_grid_into_cells(grid_img, n=9, pad_frac=0.02):
     return cells
 
 
-def build_grid_from_partial_cells(cells, n=9):
+def build_grid_from_partial_cells(cells: list[dict], n: int = 9) -> Optional[list[dict]]:
     """
     Map an unordered set of detected cells onto an exact n x n grid.
 
@@ -417,8 +422,7 @@ def build_grid_from_partial_cells(cells, n=9):
     col_sorted = col_centers[np.argsort(col_centers)]
     row_sorted = row_centers[np.argsort(row_centers)]
 
-    # Place cells into slots; on collision prefer the cell that has a digit.
-    slots = {}
+    slots: dict[tuple[int, int], dict] = {}
     for i, c in enumerate(cells):
         r = row_rank[ky.labels_[i]]
         col = col_rank[kx.labels_[i]]
@@ -426,7 +430,7 @@ def build_grid_from_partial_cells(cells, n=9):
         if key not in slots or (c['contains_digit'] and not slots[key]['contains_digit']):
             slots[key] = c
 
-    out = []
+    out: list[dict] = []
     for r in range(n):
         for col in range(n):
             if (r, col) in slots:
@@ -446,7 +450,9 @@ def build_grid_from_partial_cells(cells, n=9):
     return out
 
 
-def get_valid_cells_from_image(img, grid_size=576):
+def get_valid_cells_from_image(
+    img: np.ndarray, grid_size: int = 576
+) -> tuple[list[dict], np.ndarray, np.ndarray]:
     """
     Full pipeline: detect grid boundary -> warp -> extract 81 cells.
 
@@ -462,13 +468,12 @@ def get_valid_cells_from_image(img, grid_size=576):
     """
     M_matrices, warped_images, contour_list = find_grid_contour_candidates(img)
     if not warped_images:
-        raise Exception(
+        raise ValueError(
             "No grid boundary detected. Make sure the Sudoku grid is clearly "
             "visible and fills most of the image."
         )
 
     # ── 1. Contour path ──────────────────────────────────────────────────
-    # Track the best candidate (most cells) for recovery / fallback.
     best = None  # (n_cells, cells, M, grid_image, contour)
     for i, grid_image in enumerate(warped_images):
         cells = locate_cells_within_grid(grid_image)
@@ -478,18 +483,13 @@ def get_valid_cells_from_image(img, grid_size=576):
             best = (len(cells), cells, M_matrices[i], grid_image, contour_list[i])
 
     # ── 2. Partial-grid recovery ─────────────────────────────────────────
-    # 54 = two-thirds of 81: enough detected cells that centroid clustering
-    # reliably reconstructs the 9x9 layout.
-    best_n, best_cells, best_M, best_grid, best_contour = best
+    best_n, best_cells, best_M, best_grid, best_contour = best  # type: ignore[misc]
     if best_n >= 54:
         recovered = build_grid_from_partial_cells(best_cells)
         if recovered is not None:
             return recovered, best_M, best_grid
 
     # ── 3. Slice fallback ────────────────────────────────────────────────
-    # Re-warp the best grid candidate to a square so it slices into an exact
-    # 9x9. A fresh M is required because the square warp differs from the
-    # aspect-preserving warp used above (generate_solution_image unwarps with it).
     perimeter = cv2.arcLength(best_contour, True)
     approx    = cv2.approxPolyDP(best_contour, 0.03 * perimeter, True)
     pts = (np.squeeze(approx, axis=1).astype(np.float32)
@@ -501,10 +501,12 @@ def get_valid_cells_from_image(img, grid_size=576):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Prediction & visualisation (unchanged API)
+# Prediction & per-cell details
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_predicted_sudoku_grid_torch(model, cells, device):
+def get_predicted_sudoku_grid_torch(
+    model: torch.nn.Module, cells: list[dict], device: torch.device
+) -> np.ndarray:
     digit_images = np.array([c['img'] for c in cells if c['contains_digit']])
     if len(digit_images) == 0:
         return np.zeros((9, 9), dtype=int)
@@ -517,19 +519,33 @@ def get_predicted_sudoku_grid_torch(model, cells, device):
     return np.reshape(grid, (9, 9))
 
 
-def plot_cell_images_in_grid(cells):
-    canvas = np.zeros((9 * 28, 9 * 28))
-    for i, cell in enumerate(cells):
-        r, c = divmod(i, 9)
-        canvas[r*28:(r+1)*28, c*28:(c+1)*28] = cell['img']
-    fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(canvas, cmap='gray')
-    ax.set_title('Extracted and Sorted 81 Cells (9×9 Grid Layout)', fontweight='bold')
-    ax.axis('off')
-    return fig
+def get_per_cell_predictions(
+    model: torch.nn.Module, cells: list[dict], device: torch.device
+) -> list[dict]:
+    """Returns predicted label and confidence for every cell."""
+    results = []
+    for cell in cells:
+        if not cell['contains_digit']:
+            results.append({'label': 0, 'confidence': 1.0, 'has_digit': False})
+            continue
+        img = cell['img'].astype('float32') / 255.0
+        tensor = torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0).to(device)
+        with torch.no_grad():
+            output = model(tensor)
+            probs = torch.softmax(output, dim=1).cpu().numpy()[0]
+            pred = int(np.argmax(probs))
+            conf = float(probs[pred])
+        results.append({'label': pred, 'confidence': conf, 'has_digit': True})
+    return results
 
 
-def generate_solution_image(full_image, board_image, cells_list, solved_board_arr, M_matrix):
+def generate_solution_image(
+    full_image: np.ndarray,
+    board_image: np.ndarray,
+    cells_list: list[dict],
+    solved_board_arr: np.ndarray,
+    M_matrix: np.ndarray,
+) -> np.ndarray:
     font = cv2.FONT_HERSHEY_SIMPLEX
     h, w  = board_image.shape[:2]
     sol   = np.ones((h, w, 3), dtype=np.uint8) * 255

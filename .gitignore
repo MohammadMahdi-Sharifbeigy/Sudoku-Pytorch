@@ -27,3 +27,6 @@ Thumbs.db
 
 #codegrapg
 .codegraph/
+
+#claude
+.claude/

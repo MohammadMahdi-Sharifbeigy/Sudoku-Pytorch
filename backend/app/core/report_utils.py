@@ -7,22 +7,24 @@ and per-image inference details.
 import os
 import datetime
 import numpy as np
+import torch.nn as nn
 from sklearn.metrics import confusion_matrix, classification_report
+from typing import Any
 
 
 # ──────────────────────────────────────────────
 # Internal helpers
 # ──────────────────────────────────────────────
 
-def _timestamp():
+def _timestamp() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _separator(char="=", width=60):
+def _separator(char: str = "=", width: int = 60) -> str:
     return char * width
 
 
-def _section(title, char="=", width=60):
+def _section(title: str, char: str = "=", width: int = 60) -> str:
     bar = _separator(char, width)
     return f"\n{bar}\n  {title}\n{bar}\n"
 
@@ -32,65 +34,40 @@ def _section(title, char="=", width=60):
 # ──────────────────────────────────────────────
 
 def save_training_report(
-    history,
-    test_loss,
-    test_acc,
-    y_true,
-    y_pred,
-    dataset_mode,
-    epochs,
-    learning_rate,
-    batch_size,
-    best_val_loss,
-    model,
-    output_path="models/training_report.txt",
-):
-    """
-    Write a comprehensive training report to *output_path*.
-
-    Parameters
-    ----------
-    history       : dict with keys 'Train Loss', 'Val Loss', 'Train Acc', 'Val Acc'
-    test_loss     : float
-    test_acc      : float (percentage, 0-100)
-    y_true        : list[int] – ground-truth labels from test set
-    y_pred        : list[int] – predicted labels from test set
-    dataset_mode  : str – description of the training dataset used
-    epochs        : int
-    learning_rate : float
-    batch_size    : int
-    best_val_loss : float
-    model         : nn.Module – for parameter count
-    output_path   : str
-    """
+    history: dict[str, list[float]],
+    test_loss: float,
+    test_acc: float,
+    y_true: list[int],
+    y_pred: list[int],
+    dataset_mode: str,
+    epochs: int,
+    learning_rate: float,
+    batch_size: int,
+    best_val_loss: float,
+    model: nn.Module,
+    output_path: str = "models/training_report.txt",
+) -> str:
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    # Collect unique labels and build human-readable class names
     all_labels = sorted(set(y_true) | set(y_pred))
     class_names = {lbl: ("Empty" if lbl == 0 else str(lbl)) for lbl in all_labels}
 
-    # Confusion matrix
     cm = confusion_matrix(y_true, y_pred, labels=all_labels)
-
-    # sklearn classification report
     target_names = [class_names[l] for l in all_labels]
     clf_report = classification_report(
         y_true, y_pred, labels=all_labels, target_names=target_names, digits=4
     )
 
-    # Count model parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    lines = []
+    lines: list[str] = []
 
-    # ── Header ──────────────────────────────────
     lines.append(_separator("="))
     lines.append("  SUDOKU DIGIT CNN – TRAINING REPORT")
     lines.append(f"  Generated : {_timestamp()}")
     lines.append(_separator("="))
 
-    # ── Configuration ───────────────────────────
     lines.append(_section("Training Configuration"))
     lines.append(f"  Dataset mode   : {dataset_mode}")
     lines.append(f"  Epochs         : {epochs}")
@@ -99,7 +76,6 @@ def save_training_report(
     lines.append(f"  Total params   : {total_params:,}")
     lines.append(f"  Trainable      : {trainable_params:,}")
 
-    # ── Epoch-by-epoch history ───────────────────
     lines.append(_section("Epoch History"))
     header = f"{'Epoch':>6}  {'Train Loss':>11}  {'Val Loss':>9}  {'Train Acc':>10}  {'Val Acc':>8}"
     lines.append(header)
@@ -113,19 +89,15 @@ def save_training_report(
     lines.append("")
     lines.append(f"  Best validation loss : {best_val_loss:.6f}")
 
-    # ── Test set summary ─────────────────────────
     lines.append(_section("Test Set Results"))
     lines.append(f"  Test Loss     : {test_loss:.6f}")
     lines.append(f"  Test Accuracy : {test_acc:.4f}%")
 
-    # ── Classification report ────────────────────
     lines.append(_section("Per-Class Classification Report"))
     lines.append(clf_report)
 
-    # ── Confusion matrix (text) ──────────────────
     lines.append(_section("Confusion Matrix (rows=True, cols=Predicted)"))
 
-    # Column header
     col_w = 7
     header_row = " " * 8 + "".join(f"{class_names[l]:>{col_w}}" for l in all_labels)
     lines.append(header_row)
@@ -138,7 +110,6 @@ def save_training_report(
     lines.append("")
     lines.append("  (Diagonal = correct predictions; off-diagonal = confusion pairs)")
 
-    # ── Per-class accuracy table ─────────────────
     lines.append(_section("Per-Class Accuracy"))
     header = f"  {'Class':>8}  {'Correct':>8}  {'Total':>7}  {'Accuracy':>9}"
     lines.append(header)
@@ -151,7 +122,6 @@ def save_training_report(
         acc    = 100.0 * n_corr / n_tot if n_tot > 0 else 0.0
         lines.append(f"  {class_names[lbl]:>8}  {n_corr:>8}  {n_tot:>7}  {acc:>8.2f}%")
 
-    # ── Footer ───────────────────────────────────
     lines.append("\n" + _separator("="))
     lines.append("  END OF REPORT")
     lines.append(_separator("=") + "\n")
@@ -167,37 +137,23 @@ def save_training_report(
 # ──────────────────────────────────────────────
 
 def save_inference_report(
-    image_name,
-    cells,
-    per_cell_info,
-    grid_array,
-    solved_board,
-    output_path="models/inference_report.txt",
-):
-    """
-    Write a per-cell extraction + prediction report to *output_path*.
-
-    Parameters
-    ----------
-    image_name     : str – filename / label for the uploaded image
-    cells          : list[dict] – sorted cell dicts from vision pipeline
-    per_cell_info  : list[dict] – {'label', 'confidence', 'has_digit'} per cell
-    grid_array     : np.ndarray shape (9,9) – raw predicted grid
-    solved_board   : np.ndarray shape (9,9) or None – solved grid, None if unsolvable
-    output_path    : str
-    """
+    image_name: str,
+    cells: list[dict[str, Any]],
+    per_cell_info: list[dict[str, Any]],
+    grid_array: Any,
+    solved_board: Any,
+    output_path: str = "models/inference_report.txt",
+) -> str:
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    lines = []
+    lines: list[str] = []
 
-    # ── Header ──────────────────────────────────
     lines.append(_separator("="))
     lines.append("  SUDOKU DIGIT CNN – INFERENCE REPORT")
     lines.append(f"  Generated  : {_timestamp()}")
     lines.append(f"  Image      : {image_name}")
     lines.append(_separator("="))
 
-    # ── Cell-by-cell table ───────────────────────
     lines.append(_section("Cell-by-Cell Extraction & Prediction"))
     lines.append(
         f"  {'Cell':>5}  {'Row':>4}  {'Col':>4}  {'Has Digit':>10}"
@@ -217,15 +173,12 @@ def save_inference_report(
             f"  {pred:>9}  {conf:>11}  {h}x{w}"
         )
 
-        # Blank row between Sudoku box rows (every 3rd row)
         if col == 8 and row in (2, 5):
             lines.append("")
 
-    # ── Raw predicted grid ───────────────────────
     lines.append(_section("Raw Predicted Grid (0 = empty)"))
     lines.append(_format_grid(grid_array))
 
-    # ── Solved grid ──────────────────────────────
     if solved_board is not None:
         lines.append(_section("Solved Grid"))
         lines.append(_format_grid(solved_board))
@@ -234,13 +187,12 @@ def save_inference_report(
         lines.append("  *** Grid could not be solved. ***")
         lines.append("  Check the raw predicted grid above for misread digits.")
 
-    # ── Summary statistics ───────────────────────
     n_digits  = sum(1 for i in per_cell_info if i['has_digit'])
     n_empty   = 81 - n_digits
     if n_digits > 0:
         confs = [i['confidence'] for i in per_cell_info if i['has_digit']]
-        avg_conf = np.mean(confs) * 100
-        min_conf = np.min(confs) * 100
+        avg_conf = float(np.mean(confs)) * 100
+        min_conf = float(np.min(confs)) * 100
         low_conf_cells = [(idx, per_cell_info[idx]) for idx in range(81)
                           if per_cell_info[idx]['has_digit']
                           and per_cell_info[idx]['confidence'] < 0.50]
@@ -265,7 +217,6 @@ def save_inference_report(
                     f"  predicted={info['label']}  conf={info['confidence']*100:.1f}%"
                 )
 
-    # ── Footer ───────────────────────────────────
     lines.append("\n" + _separator("="))
     lines.append("  END OF REPORT")
     lines.append(_separator("=") + "\n")
@@ -280,9 +231,9 @@ def save_inference_report(
 # Grid formatter (shared)
 # ──────────────────────────────────────────────
 
-def _format_grid(grid):
+def _format_grid(grid: Any) -> str:
     """Returns a nicely formatted 9×9 Sudoku grid string."""
-    lines = []
+    lines: list[str] = []
     for r in range(9):
         if r in (3, 6):
             lines.append("  ------+-------+------")
