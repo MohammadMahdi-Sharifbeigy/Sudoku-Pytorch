@@ -20,6 +20,8 @@ export interface SolveResponse {
   cells: CellData[];
   original_image_b64: string;
   solved_image_b64: string;
+  threshold_image_b64: string;
+  cell_grid_image_b64: string;
   solve_time_ms?: number;
 }
 
@@ -69,6 +71,8 @@ interface BackendSolveResponse {
   per_cell: BackendCellPrediction[];
   solution_image_b64: string | null;
   board_image_b64: string;
+  threshold_image_b64?: string;
+  cell_grid_image_b64?: string;
 }
 
 interface ApiErrorPayload {
@@ -94,6 +98,8 @@ function normalizeSolveResponse(data: BackendSolveResponse): SolveResponse {
     })),
     original_image_b64: data.board_image_b64,
     solved_image_b64: data.solution_image_b64 ?? data.board_image_b64,
+    threshold_image_b64: data.threshold_image_b64 ?? data.board_image_b64,
+    cell_grid_image_b64: data.cell_grid_image_b64 ?? data.board_image_b64,
   };
 }
 

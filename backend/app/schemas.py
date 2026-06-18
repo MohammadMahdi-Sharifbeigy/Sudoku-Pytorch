@@ -29,6 +29,8 @@ class SolveResponse(BaseModel):
     confidence_stats: ConfidenceStats
     solution_image_b64: Optional[str]  # base64-encoded annotated PNG
     board_image_b64: str               # base64-encoded warped grid PNG
+    threshold_image_b64: str           # base64-encoded adaptive threshold PNG
+    cell_grid_image_b64: str           # base64-encoded extracted cells grid PNG
     error: Optional[str] = None
     detail: Optional[str] = None
 

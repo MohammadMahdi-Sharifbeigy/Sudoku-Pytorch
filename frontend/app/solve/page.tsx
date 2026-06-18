@@ -7,7 +7,7 @@ import { solveSudoku, type SolveResponse, type CellData } from "@/lib/api";
 import { CellGridSkeleton, SudokuBoardSkeleton } from "@/components/ui/Skeletons";
 
 /* ── Types ─────────────────────────────────────────────────────── */
-type Tab = "solution" | "cells" | "raw";
+type Tab = "solution" | "preprocess" | "cells" | "raw";
 
 /* ── Constants ──────────────────────────────────────────────────── */
 const LOADING_STEPS = [
@@ -19,6 +19,7 @@ const LOADING_STEPS = [
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "solution", label: "Solution" },
+  { id: "preprocess", label: "Preprocess" },
   { id: "cells",    label: "Cell Analysis" },
   { id: "raw",      label: "Raw Grid" },
 ];
@@ -307,6 +308,69 @@ function SolutionTab({ result, onCopy }: { result: SolveResponse; onCopy: () => 
           Copy Grid
         </button>
       </div>
+    </div>
+  );
+}
+
+function ImagePanel({ label, b64, alt }: { label: string; b64: string; alt: string }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <span
+        className="text-caption"
+        style={{
+          color: "var(--fg-muted)",
+          fontFamily: "var(--font-space-mono), monospace",
+          fontSize: "11px",
+          letterSpacing: "0.06em",
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </span>
+      <div
+        style={{
+          borderRadius: "var(--r-lg)",
+          overflow: "hidden",
+          border: "1px solid var(--border-col)",
+          background: "#0e0e16",
+          boxShadow: "0 4px 24px rgba(0,0,0,0.4)",
+          aspectRatio: "1/1",
+        }}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={`data:image/png;base64,${b64}`}
+          alt={alt}
+          style={{ width: "100%", height: "100%", objectFit: "contain", imageRendering: "pixelated" }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function PreprocessTab({ result }: { result: SolveResponse }) {
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      <ImagePanel
+        label="Adaptive Threshold"
+        b64={result.threshold_image_b64}
+        alt="Adaptive threshold preprocessing result"
+      />
+      <ImagePanel
+        label="Cell Extraction"
+        b64={result.cell_grid_image_b64}
+        alt="Extracted sudoku cell images in a 9 by 9 grid"
+      />
+      <ImagePanel
+        label="Warped Board"
+        b64={result.original_image_b64}
+        alt="Perspective-corrected sudoku board"
+      />
+      <ImagePanel
+        label="Final Overlay"
+        b64={result.solved_image_b64}
+        alt="Solved sudoku overlaid on the source image"
+      />
     </div>
   );
 }
@@ -981,6 +1045,9 @@ export default function SolvePage() {
             >
               {activeTab === "solution" && (
                 <SolutionTab result={result} onCopy={handleCopy} />
+              )}
+              {activeTab === "preprocess" && (
+                <PreprocessTab result={result} />
               )}
               {activeTab === "cells" && (
                 <CellAnalysisTab cells={result.cells} />

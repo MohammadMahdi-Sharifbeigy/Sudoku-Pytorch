@@ -175,7 +175,7 @@ def generate_empty_cells(num_samples: int = 3000) -> tuple[torch.Tensor, ...]:
             torch.from_numpy(y_train), torch.from_numpy(y_val), torch.from_numpy(y_test))
 
 
-def load_mnist_images(data_path: str = './data') -> tuple[torch.Tensor, ...]:
+def load_mnist_images(data_path: str) -> tuple[torch.Tensor, ...]:
     os.makedirs(data_path, exist_ok=True)
 
     mnist_train = datasets.MNIST(root=data_path, train=True, download=True)

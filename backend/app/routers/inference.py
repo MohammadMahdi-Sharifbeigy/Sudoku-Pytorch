@@ -9,9 +9,11 @@ from fastapi import APIRouter, File, Request, UploadFile, HTTPException
 
 from app.core.vision import (
     resize_and_maintain_aspect_ratio,
+    apply_grayscale_blur_and_threshold,
     get_valid_cells_from_image,
     get_per_cell_predictions,
     get_predicted_sudoku_grid_torch,
+    plot_cell_images_in_grid,
     generate_solution_image,
 )
 from app.core.solver import SudokuSolver
@@ -51,8 +53,10 @@ def _run_pipeline(img_bytes: bytes, model, device) -> dict:  # type: ignore[type
         raise ValueError("Could not decode image. Ensure the file is a valid JPEG or PNG.")
 
     img = resize_and_maintain_aspect_ratio(img, new_width=1000)
+    threshold_image = apply_grayscale_blur_and_threshold(img)
 
     cells, M, board_image = get_valid_cells_from_image(img)
+    cell_grid_image = plot_cell_images_in_grid(cells)
 
     per_cell_info = get_per_cell_predictions(model, cells, device)
     grid_array = get_predicted_sudoku_grid_torch(model, cells, device)
@@ -101,6 +105,8 @@ def _run_pipeline(img_bytes: bytes, model, device) -> dict:  # type: ignore[type
         confidence_stats=stats,
         solution_image_b64=solution_image_b64,
         board_image_b64=board_image_b64,
+        threshold_image_b64=_encode_image_b64(threshold_image),
+        cell_grid_image_b64=_encode_image_b64(cell_grid_image),
     )
 
 
