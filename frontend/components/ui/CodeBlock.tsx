@@ -11,17 +11,27 @@ export interface CodeBlockProps {
 const KEYWORDS = /\b(import|from|const|let|with|return|if|else|as|None|true|false|providers|model|session)\b/g;
 const STRINGS = /("[^"]*"|'[^']*')/g;
 
-function highlight(code: string): string {
-  return code
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(STRINGS, '<span style="color:#FFB800">$1</span>')
-    .replace(KEYWORDS, '<span style="color:#00D4FF">$1</span>');
+function tokenize(line: string): Array<{ text: string; tone: "plain" | "string" | "keyword" }> {
+  const tokens: Array<{ text: string; tone: "plain" | "string" | "keyword" }> = [];
+  const matches = Array.from(line.matchAll(new RegExp(`${STRINGS.source}|${KEYWORDS.source}`, "g")));
+  let cursor = 0;
+
+  for (const match of matches) {
+    const text = match[0];
+    const index = match.index ?? 0;
+    if (index > cursor) tokens.push({ text: line.slice(cursor, index), tone: "plain" });
+    tokens.push({ text, tone: STRINGS.test(text) ? "string" : "keyword" });
+    STRINGS.lastIndex = 0;
+    cursor = index + text.length;
+  }
+
+  if (cursor < line.length) tokens.push({ text: line.slice(cursor), tone: "plain" });
+  return tokens;
 }
 
 export function CodeBlock({ code, language }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
+  const lines = code.split("\n");
 
   const copyCode = async () => {
     await navigator.clipboard.writeText(code);
@@ -63,7 +73,28 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
           fontFamily: "var(--font-space-mono), monospace",
         }}
       >
-        <code dangerouslySetInnerHTML={{ __html: highlight(code) }} />
+        <code>
+          {lines.map((line, lineIndex) => (
+            <span key={`${line}-${lineIndex}`}>
+              {tokenize(line).map((token, tokenIndex) => (
+                <span
+                  key={`${token.text}-${tokenIndex}`}
+                  style={{
+                    color:
+                      token.tone === "string"
+                        ? "#FFB800"
+                        : token.tone === "keyword"
+                          ? "#00D4FF"
+                          : undefined,
+                  }}
+                >
+                  {token.text}
+                </span>
+              ))}
+              {lineIndex < lines.length - 1 ? "\n" : null}
+            </span>
+          ))}
+        </code>
       </pre>
     </div>
   );

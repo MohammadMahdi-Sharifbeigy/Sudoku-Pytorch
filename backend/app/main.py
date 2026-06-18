@@ -33,7 +33,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # cleanup (nothing to release here)
 
 
-cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
+default_cors_origins = ",".join(
+    [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:8050",
+        "http://localhost:8080",
+    ]
+)
+cors_origins = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", default_cors_origins).split(",")
+    if origin.strip()
+]
 
 app = FastAPI(
     title="Sudoku Solver API",

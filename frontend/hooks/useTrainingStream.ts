@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
+import { startTraining as createTrainingUrl } from "@/lib/api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const MAX_RETRIES = 3;
 
 export type DatasetMode = "mnist_fonts" | "mnist_hoda" | "all";
@@ -92,12 +93,14 @@ export function useTrainingStream() {
         completeRef.current = true;
         setModelPath(event.model_path);
         setStatus("complete");
+        toast.success("Training complete!");
         closeStream();
         break;
       case "error":
         completeRef.current = true;
         setError(event.message);
         setStatus("error");
+        toast.error(`Training failed: ${event.message}`);
         closeStream();
         break;
     }
@@ -119,6 +122,7 @@ export function useTrainingStream() {
         completeRef.current = true;
         setError("Training stream returned an unreadable event.");
         setStatus("error");
+        toast.error("Training failed: unreadable stream event");
         closeStream();
       }
     };
@@ -131,6 +135,7 @@ export function useTrainingStream() {
       if (retryCountRef.current >= MAX_RETRIES) {
         setError("Training stream connection dropped. Reconnect limit reached.");
         setStatus("error");
+        toast.error("Training failed: connection dropped");
         eventSourceRef.current = null;
         return;
       }
@@ -164,14 +169,9 @@ export function useTrainingStream() {
     setTestResults(null);
     setModelPath(null);
 
-    const url = new URL(`${API_BASE}/api/train/stream`);
-    url.searchParams.set("epochs", String(config.epochs));
-    url.searchParams.set("learning_rate", String(config.learningRate));
-    url.searchParams.set("batch_size", String(config.batchSize));
-    url.searchParams.set("dataset_mode", config.datasetMode);
-
-    trainingUrlRef.current = url.toString();
-    openStream(url.toString());
+    const url = createTrainingUrl(config);
+    trainingUrlRef.current = url;
+    openStream(url);
   }, [closeStream, openStream]);
 
   const resetTraining = useCallback(() => {

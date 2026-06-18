@@ -28,6 +28,11 @@ Thumbs.db
 # Streamlit
 .streamlit/
 
+# Frontend test artifacts
+frontend/test-results/
+frontend/playwright-report/
+frontend/debug.log
+
 #codegrapg
 .codegraph/
 

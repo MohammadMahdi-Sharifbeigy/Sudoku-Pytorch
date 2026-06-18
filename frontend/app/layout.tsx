@@ -3,6 +3,7 @@ import { Space_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
 import { Shell } from "@/components/layout/Shell";
+import { GlobalErrorBoundary } from "@/components/layout/GlobalErrorBoundary";
 
 const spaceMono = Space_Mono({
   weight: ["400", "700"],
@@ -40,7 +41,9 @@ export default function RootLayout({
     >
       <body className="min-h-dvh flex flex-col antialiased">
         <Providers>
-          <Shell>{children}</Shell>
+          <GlobalErrorBoundary>
+            <Shell>{children}</Shell>
+          </GlobalErrorBoundary>
         </Providers>
       </body>
     </html>

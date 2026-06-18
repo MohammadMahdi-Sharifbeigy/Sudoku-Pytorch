@@ -180,6 +180,12 @@
     color: #fff;
   }
 
+  :where(a, button, input, select, textarea, [role="button"], [role="tab"], [tabindex]):focus-visible {
+    outline: 2px solid var(--cyan);
+    outline-offset: 4px;
+    box-shadow: 0 0 0 4px rgba(0, 212, 255, 0.12);
+  }
+
   /* Custom scrollbar */
   ::-webkit-scrollbar { width: 5px; height: 5px; }
   ::-webkit-scrollbar-track { background: var(--bg); }

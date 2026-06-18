@@ -1,12 +1,14 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+export type DatasetMode = "mnist_fonts" | "mnist_hoda" | "all";
+
 export interface CellData {
   row: number;
   col: number;
-  value: number;          // 0 = empty, 1-9 = digit
-  confidence: number;     // 0.0 – 1.0
+  value: number;
+  confidence: number;
   is_given: boolean;
-  image_b64: string;      // base64 PNG, 28×28
+  image_b64: string;
 }
 
 export interface SolveResponse {
@@ -19,6 +21,34 @@ export interface SolveResponse {
   original_image_b64: string;
   solved_image_b64: string;
   solve_time_ms?: number;
+}
+
+export interface TrainingConfig {
+  epochs: number;
+  learningRate: number;
+  batchSize: number;
+  datasetMode: DatasetMode;
+}
+
+export interface ModelInfo {
+  exists: boolean;
+  size_mb: number | null;
+  created_at: string | null;
+  total_params: number | null;
+  trainable_params: number | null;
+}
+
+export interface BenchmarkEntry {
+  format: "pt" | "ts" | "onnx" | string;
+  size_mb: number;
+  latency_ms: number | null;
+  path: string;
+}
+
+export interface BenchmarkResult {
+  success: boolean;
+  results: BenchmarkEntry[];
+  error?: string | null;
 }
 
 interface BackendCellPrediction {
@@ -41,6 +71,12 @@ interface BackendSolveResponse {
   board_image_b64: string;
 }
 
+interface ApiErrorPayload {
+  error?: string;
+  detail?: string;
+  message?: string;
+}
+
 function normalizeSolveResponse(data: BackendSolveResponse): SolveResponse {
   return {
     success: data.success,
@@ -61,24 +97,66 @@ function normalizeSolveResponse(data: BackendSolveResponse): SolveResponse {
   };
 }
 
-export async function solveImage(
-  file: File,
-  signal?: AbortSignal,
-): Promise<SolveResponse> {
+export async function parseApiError(res: Response): Promise<string> {
+  try {
+    const data = (await res.json()) as ApiErrorPayload;
+    return data.error ?? data.detail ?? data.message ?? `HTTP ${res.status}`;
+  } catch {
+    return `HTTP ${res.status}`;
+  }
+}
+
+async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+  const res = await fetch(input, init);
+
+  if (!res.ok) {
+    throw new Error(await parseApiError(res));
+  }
+
+  return (await res.json()) as T;
+}
+
+export function trainingStreamUrl(config: TrainingConfig): string {
+  const url = new URL(`${API_BASE}/api/train/stream`);
+  url.searchParams.set("epochs", String(config.epochs));
+  url.searchParams.set("learning_rate", String(config.learningRate));
+  url.searchParams.set("batch_size", String(config.batchSize));
+  url.searchParams.set("dataset_mode", config.datasetMode);
+  return url.toString();
+}
+
+export async function solveSudoku(file: File, signal?: AbortSignal): Promise<SolveResponse> {
   const body = new FormData();
   body.append("image", file);
 
-  const res = await fetch(`${API_BASE}/api/solve`, {
+  const data = await requestJson<BackendSolveResponse>(`${API_BASE}/api/solve`, {
     method: "POST",
     body,
     signal,
   });
 
-  const data = await res.json();
+  return normalizeSolveResponse(data);
+}
 
-  if (!res.ok) {
-    throw new Error(data?.error ?? data?.detail ?? `HTTP ${res.status}`);
-  }
+export async function solveImage(file: File, signal?: AbortSignal): Promise<SolveResponse> {
+  return solveSudoku(file, signal);
+}
 
-  return normalizeSolveResponse(data as BackendSolveResponse);
+export function startTraining(config: TrainingConfig): string {
+  return trainingStreamUrl(config);
+}
+
+export async function getModelInfo(signal?: AbortSignal): Promise<ModelInfo> {
+  return requestJson<ModelInfo>(`${API_BASE}/api/model/info`, { signal });
+}
+
+export async function runOptimization(signal?: AbortSignal): Promise<BenchmarkResult> {
+  return requestJson<BenchmarkResult>(`${API_BASE}/api/optimize`, {
+    method: "POST",
+    signal,
+  });
+}
+
+export function modelDownloadUrl(format: "pt" | "ts" | "onnx"): string {
+  return `${API_BASE}/api/models/download?format=${format}`;
 }

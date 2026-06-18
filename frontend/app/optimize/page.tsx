@@ -28,39 +28,17 @@ import {
 } from "recharts";
 import { CodeBlock } from "@/components/ui/CodeBlock";
 import { StatCard } from "@/components/ui/StatCard";
+import {
+  getModelInfo,
+  modelDownloadUrl,
+  runOptimization,
+  type BenchmarkEntry,
+  type ModelInfo,
+} from "@/lib/api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-
-type BenchmarkFormat = "pt" | "ts" | "onnx" | string;
 type LoadState = "idle" | "loading" | "ready" | "error";
 type BenchmarkState = "idle" | "running" | "complete" | "error";
 type AccordionId = "torchscript" | "onnx";
-
-interface ModelInfo {
-  exists: boolean;
-  size_mb: number | null;
-  created_at: string | null;
-  total_params: number | null;
-  trainable_params: number | null;
-}
-
-interface BenchmarkEntry {
-  format: BenchmarkFormat;
-  size_mb: number;
-  latency_ms: number | null;
-  path: string;
-}
-
-interface BenchmarkResult {
-  success: boolean;
-  results: BenchmarkEntry[];
-  error?: string | null;
-}
-
-interface ApiErrorPayload {
-  detail?: string;
-  error?: string;
-}
 
 const FORMAT_LABELS: Record<string, string> = {
   pt: "PyTorch",
@@ -119,39 +97,6 @@ function formatDate(value: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
-}
-
-async function readApiError(res: Response): Promise<string> {
-  try {
-    const payload = (await res.json()) as ApiErrorPayload;
-    return payload.error ?? payload.detail ?? `HTTP ${res.status}`;
-  } catch {
-    return `HTTP ${res.status}`;
-  }
-}
-
-async function fetchModelInfo(signal?: AbortSignal): Promise<ModelInfo> {
-  const res = await fetch(`${API_BASE}/api/model/info`, { signal });
-
-  if (!res.ok) {
-    throw new Error(await readApiError(res));
-  }
-
-  return (await res.json()) as ModelInfo;
-}
-
-async function runBenchmark(): Promise<BenchmarkResult> {
-  const res = await fetch(`${API_BASE}/api/optimize`, { method: "POST" });
-
-  if (!res.ok) {
-    throw new Error(await readApiError(res));
-  }
-
-  return (await res.json()) as BenchmarkResult;
-}
-
-function downloadUrl(format: "pt" | "ts" | "onnx"): string {
-  return `${API_BASE}/api/models/download?format=${format}`;
 }
 
 function GlassPanel({
@@ -375,7 +320,7 @@ export default function OptimizePage() {
     setError(null);
 
     try {
-      const info = await fetchModelInfo(signal);
+      const info = await getModelInfo(signal);
       setModelInfo(info);
       setModelState("ready");
     } catch (err) {
@@ -394,7 +339,7 @@ export default function OptimizePage() {
       setError(null);
 
       try {
-        const info = await fetchModelInfo(controller.signal);
+        const info = await getModelInfo(controller.signal);
         setModelInfo(info);
         setModelState("ready");
       } catch (err) {
@@ -424,16 +369,16 @@ export default function OptimizePage() {
     setResults([]);
 
     try {
-      const data = await runBenchmark();
+      const data = await runOptimization();
       setResults(data.results);
       setBenchmarkState("complete");
-      toast.success("Optimization benchmark complete");
+      toast.success("Model exported!");
       void loadModelInfo();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Optimization failed";
       setError(message);
       setBenchmarkState("error");
-      toast.error(message);
+      toast.error(`Model export failed: ${message}`);
     }
   };
 
@@ -636,7 +581,7 @@ export default function OptimizePage() {
                 {(["pt", "ts", "onnx"] as const).map((format) => (
                   <a
                     key={format}
-                    href={downloadUrl(format)}
+                    href={modelDownloadUrl(format)}
                     className="btn-press inline-flex h-10 items-center gap-2 rounded-[var(--r-pill)] border border-[#00D4FF]/30 bg-[#00D4FF]/10 px-4 text-caption font-semibold text-[#00D4FF] transition hover:border-[#00D4FF] hover:bg-[#00D4FF]/15"
                   >
                     <ArrowDownToLine className="size-3.5" />
