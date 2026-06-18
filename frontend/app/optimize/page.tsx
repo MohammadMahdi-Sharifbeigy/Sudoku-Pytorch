@@ -8,7 +8,6 @@ import {
   ArrowDownToLine,
   CheckCircle2,
   ChevronDown,
-  Clipboard,
   Cpu,
   FileArchive,
   Gauge,
@@ -27,6 +26,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { CodeBlock } from "@/components/ui/CodeBlock";
+import { StatCard } from "@/components/ui/StatCard";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -203,34 +204,6 @@ function StatusPill({
   );
 }
 
-function MetricTile({
-  label,
-  value,
-  icon,
-}: {
-  label: string;
-  value: string;
-  icon: React.ReactNode;
-}) {
-  return (
-    <div
-      className="rounded-[var(--r-md)] border px-4 py-3"
-      style={{
-        background: "rgba(255,255,255,0.035)",
-        borderColor: "rgba(255,255,255,0.07)",
-      }}
-    >
-      <div className="mb-3 flex items-center justify-between gap-4 text-[#00D4FF]">
-        {icon}
-        <span className="text-caption" style={{ color: "rgba(200,200,212,0.46)" }}>
-          {label}
-        </span>
-      </div>
-      <p className="font-mono text-xl font-bold text-white">{value}</p>
-    </div>
-  );
-}
-
 function LoadingSpinner() {
   return (
     <span className="relative grid h-5 w-5 place-items-center">
@@ -346,15 +319,6 @@ function CodeAccordion({
   open: boolean;
   onToggle: (id: AccordionId) => void;
 }) {
-  const copyCode = async () => {
-    try {
-      await navigator.clipboard.writeText(code);
-      toast.success(`${title} snippet copied`);
-    } catch {
-      toast.error("Copy failed");
-    }
-  };
-
   return (
     <div
       className="overflow-hidden rounded-[var(--r-lg)] border transition-colors"
@@ -387,25 +351,7 @@ function CodeAccordion({
       >
         <div className="min-h-0 overflow-hidden">
           <div className="px-4 pb-4 sm:px-5 sm:pb-5">
-            <div className="relative overflow-hidden rounded-[var(--r-md)] border border-[#1E1E2E] bg-[#090910]">
-              <button
-                type="button"
-                onClick={copyCode}
-                className="btn-press absolute right-3 top-3 z-10 inline-flex h-9 items-center gap-2 rounded-[var(--r-pill)] border border-[#00D4FF]/25 bg-[#00D4FF]/10 px-3 text-caption text-[#00D4FF] backdrop-blur transition hover:border-[#00D4FF]/60 hover:bg-[#00D4FF]/15"
-              >
-                <Clipboard className="size-3.5" />
-                Copy
-              </button>
-              <pre
-                className="overflow-x-auto p-5 pr-24 text-sm leading-6"
-                style={{
-                  color: "#DDE7EF",
-                  fontFamily: "var(--font-space-mono), monospace",
-                }}
-              >
-                <code>{code}</code>
-              </pre>
-            </div>
+            <CodeBlock code={code} language={title} />
           </div>
         </div>
       </div>
@@ -589,22 +535,23 @@ export default function OptimizePage() {
               ) : null}
 
               <div className="grid gap-3 sm:grid-cols-2">
-                <MetricTile
+                <StatCard
                   label="File size"
-                  value={`${formatMetric(modelInfo?.size_mb, 3)} MB`}
+                  value={formatMetric(modelInfo?.size_mb, 3)}
+                  unit="MB"
                   icon={<FileArchive className="size-4" />}
                 />
-                <MetricTile
+                <StatCard
                   label="Parameters"
                   value={formatNumber(modelInfo?.total_params)}
                   icon={<Cpu className="size-4" />}
                 />
-                <MetricTile
+                <StatCard
                   label="Trainable"
                   value={formatNumber(modelInfo?.trainable_params)}
                   icon={<Gauge className="size-4" />}
                 />
-                <MetricTile
+                <StatCard
                   label="Last trained"
                   value={formatDate(modelInfo?.created_at ?? null)}
                   icon={<CheckCircle2 className="size-4" />}
