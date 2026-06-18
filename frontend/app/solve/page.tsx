@@ -551,6 +551,15 @@ export default function SolvePage() {
     };
   }, [previewUrl]);
 
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      if (stepTimerRef.current) {
+        clearInterval(stepTimerRef.current);
+      }
+    };
+  }, []);
+
   /* ── Drop handler ────────────────────────────────────────────── */
   const onDrop = useCallback((accepted: File[], rejected: { errors: readonly { code: string }[] }[]) => {
     if (rejected.length > 0) {
@@ -582,6 +591,7 @@ export default function SolvePage() {
   /* ── Solve handler ───────────────────────────────────────────── */
   async function handleSolve() {
     if (!file) { toast.error("Upload an image first"); return; }
+    if (loading) return;
 
     setLoading(true);
     setLoadingStep(0);
@@ -607,16 +617,36 @@ export default function SolvePage() {
         toast.warning(`Low confidence on ${lowConfidenceCount} cells`);
       }
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === "AbortError") return;
+      if (err instanceof Error && err.name === "AbortError") {
+        toast.info("Solve stopped");
+        return;
+      }
       const raw = err instanceof Error ? err.message : "Solve failed";
       const msg = /grid|contour|cell|decode/i.test(raw) ? "No grid detected" : raw;
       setError(msg);
       toast.error(msg);
     } finally {
-      clearInterval(stepTimerRef.current!);
+      if (stepTimerRef.current) {
+        clearInterval(stepTimerRef.current);
+        stepTimerRef.current = null;
+      }
+      abortRef.current = null;
       setLoading(false);
       setLoadingStep(0);
     }
+  }
+
+  function handleStopSolve() {
+    if (!loading) return;
+
+    abortRef.current?.abort();
+    if (stepTimerRef.current) {
+      clearInterval(stepTimerRef.current);
+      stepTimerRef.current = null;
+    }
+    setLoading(false);
+    setLoadingStep(0);
+    setError(null);
   }
 
   /* ── Copy grid ───────────────────────────────────────────────── */
@@ -820,58 +850,88 @@ export default function SolvePage() {
             )}
           </div>
 
-          {/* Solve button */}
-          <button
-            onClick={handleSolve}
-            disabled={!file || loading}
-            className="btn-press w-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#00D4FF]"
-            aria-label="Solve uploaded sudoku"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              background: file && !loading ? "var(--cyan)" : "rgba(0,212,255,0.15)",
-              color: file && !loading ? "#0A0A0F" : "rgba(0,212,255,0.4)",
-              fontSize: "17px",
-              fontWeight: 600,
-              lineHeight: 1,
-              letterSpacing: "-0.374px",
-              borderRadius: "var(--r-pill)",
-              padding: "16px 28px",
-              minHeight: "48px",
-              border: "none",
-              cursor: file && !loading ? "pointer" : "not-allowed",
-              transition: "background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease",
-              boxShadow: file && !loading ? "0 0 24px rgba(0,212,255,0.2)" : "none",
-            }}
-            onMouseEnter={(e) => {
-              if (file && !loading) {
-                (e.currentTarget as HTMLButtonElement).style.background = "#1ADCFF";
-                (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 32px rgba(0,212,255,0.35)";
-              }
-            }}
-            onMouseLeave={(e) => {
-              if (file && !loading) {
-                (e.currentTarget as HTMLButtonElement).style.background = "var(--cyan)";
-                (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 24px rgba(0,212,255,0.2)";
-              }
-            }}
-          >
-            {loading ? (
-              <>
-                <Spinner />
-                Processing…
-              </>
-            ) : (
-              <>
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          {/* Solve controls */}
+          <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+            <button
+              onClick={handleSolve}
+              disabled={!file || loading}
+              className="btn-press w-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#00D4FF]"
+              aria-label="Solve uploaded sudoku"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "8px",
+                background: file && !loading ? "var(--cyan)" : "rgba(0,212,255,0.15)",
+                color: file && !loading ? "#0A0A0F" : "rgba(0,212,255,0.4)",
+                fontSize: "17px",
+                fontWeight: 600,
+                lineHeight: 1,
+                letterSpacing: "-0.374px",
+                borderRadius: "var(--r-pill)",
+                padding: "16px 28px",
+                minHeight: "48px",
+                border: "none",
+                cursor: file && !loading ? "pointer" : "not-allowed",
+                transition: "background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease",
+                boxShadow: file && !loading ? "0 0 24px rgba(0,212,255,0.2)" : "none",
+              }}
+              onMouseEnter={(e) => {
+                if (file && !loading) {
+                  (e.currentTarget as HTMLButtonElement).style.background = "#1ADCFF";
+                  (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 32px rgba(0,212,255,0.35)";
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (file && !loading) {
+                  (e.currentTarget as HTMLButtonElement).style.background = "var(--cyan)";
+                  (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 24px rgba(0,212,255,0.2)";
+                }
+              }}
+            >
+              {loading ? (
+                <>
+                  <Spinner />
+                  Processing…
+                </>
+              ) : (
+                <>
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  Solve Sudoku
+                </>
+              )}
+            </button>
+
+            {loading && (
+              <button
+                type="button"
+                onClick={handleStopSolve}
+                className="btn-press flex min-h-12 items-center justify-center gap-2 rounded-[var(--r-pill)] border px-5 py-3 text-caption font-semibold transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#00D4FF]"
+                aria-label="Stop sudoku solve process"
+                style={{
+                  background: "rgba(255,69,96,0.08)",
+                  borderColor: "rgba(255,69,96,0.28)",
+                  color: "#FF8A9A",
+                  boxShadow: "0 0 22px rgba(255,69,96,0.08)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "rgba(255,69,96,0.14)";
+                  e.currentTarget.style.borderColor = "rgba(255,69,96,0.42)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "rgba(255,69,96,0.08)";
+                  e.currentTarget.style.borderColor = "rgba(255,69,96,0.28)";
+                }}
+              >
+                <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+                  <rect x="4" y="4" width="7" height="7" rx="1.5" fill="currentColor" />
                 </svg>
-                Solve Sudoku
-              </>
+                Stop
+              </button>
             )}
-          </button>
+          </div>
 
           {/* Loading step labels */}
           {loading && <LoadingState step={loadingStep} />}
