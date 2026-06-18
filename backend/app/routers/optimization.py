@@ -7,6 +7,7 @@ import torch
 from fastapi import APIRouter, Request, HTTPException
 
 from app.core.model import DigitCNN
+from app.core.model_files import latest_model_path
 from app.core.optimize_model import run_optimization_and_benchmark
 from app.schemas import BenchmarkResult, BenchmarkEntry, ModelInfo
 
@@ -26,8 +27,9 @@ def _run_benchmark(model_path: str, models_dir: str) -> list[dict]:
 
 @router.post("/optimize", response_model=BenchmarkResult)
 async def optimize(request: Request) -> BenchmarkResult:
-    model_path: str = request.app.state.model_path
     models_dir: str = request.app.state.models_dir
+    model_path = latest_model_path(models_dir, request.app.state.model_path)
+    request.app.state.model_path = model_path
 
     if not os.path.exists(model_path):
         raise HTTPException(
@@ -52,7 +54,9 @@ async def optimize(request: Request) -> BenchmarkResult:
 
 @router.get("/model/info", response_model=ModelInfo)
 async def model_info(request: Request) -> ModelInfo:
-    model_path: str = request.app.state.model_path
+    models_dir: str = request.app.state.models_dir
+    model_path = latest_model_path(models_dir, request.app.state.model_path)
+    request.app.state.model_path = model_path
 
     if not os.path.exists(model_path):
         return ModelInfo(

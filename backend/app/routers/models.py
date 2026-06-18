@@ -4,14 +4,9 @@ from pathlib import Path
 from fastapi import APIRouter, Query, Request, HTTPException
 from fastapi.responses import FileResponse
 
-router = APIRouter()
+from app.core.model_files import artifact_path_for_model, latest_model_path
 
-# Map query param → fixed filename within models_dir (no user-controlled paths).
-_FORMAT_TO_FILENAME: dict[str, str] = {
-    "pt": "best_model.pt",
-    "ts": "best_model.ts",
-    "onnx": "best_model.onnx",
-}
+router = APIRouter()
 
 _FORMAT_MEDIA_TYPES: dict[str, str] = {
     "pt": "application/octet-stream",
@@ -41,17 +36,25 @@ async def download_model(
     format: str = Query(..., pattern="^(pt|ts|onnx)$"),
 ) -> FileResponse:
     models_dir: str = request.app.state.models_dir
-    filename = _FORMAT_TO_FILENAME[format]
-    file_path = os.path.join(models_dir, filename)
+    model_path = latest_model_path(models_dir, request.app.state.model_path)
+    request.app.state.model_path = model_path
 
-    if not os.path.exists(file_path):
+    file_path = model_path if format == "pt" else artifact_path_for_model(model_path, f".{format}")
+    filename = os.path.basename(file_path)
+    resolved = Path(file_path).resolve()
+    base = Path(models_dir).resolve()
+
+    if not resolved.is_relative_to(base):
+        raise HTTPException(status_code=400, detail="Invalid model path.")
+
+    if not resolved.exists():
         raise HTTPException(
             status_code=404,
             detail=f"Model file '{filename}' not found. Run /api/optimize to generate .ts and .onnx formats.",
         )
 
     return FileResponse(
-        path=file_path,
+        path=str(resolved),
         media_type=_FORMAT_MEDIA_TYPES[format],
         filename=filename,
     )

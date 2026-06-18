@@ -7,12 +7,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.model import DigitCNN
+from app.core.model_files import latest_model_path
 from app.routers import inference, training, optimization, models as models_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    model_path = os.environ.get("MODEL_PATH", "models/best_model.pt")
+    models_dir = os.environ.get("MODELS_DIR", "models")
+    configured_model_path = os.environ.get("MODEL_PATH", "models/best_model.pt")
+    model_path = latest_model_path(models_dir, configured_model_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = DigitCNN(num_classes=10)
@@ -25,7 +28,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.model = model
     app.state.device = device
     app.state.model_path = model_path
-    app.state.models_dir = os.environ.get("MODELS_DIR", "models")
+    app.state.models_dir = models_dir
     app.state.data_path = os.environ.get("DATA_PATH", "data")
 
     yield

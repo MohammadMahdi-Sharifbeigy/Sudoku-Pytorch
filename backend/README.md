@@ -38,7 +38,7 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODEL_PATH` | `models/best_model.pt` | Path to PyTorch model weights |
+| `MODEL_PATH` | `models/best_model.pt` | Fallback PyTorch model path when no latest trained checkpoint exists |
 | `MODELS_DIR` | `models` | Directory for all model files |
 | `DATA_PATH` | `data` | Path to training data directory |
 | `DEVICE` | `cpu` | Inference device (`cpu` or `cuda`) |
@@ -127,9 +127,17 @@ GET /api/train/stream?epochs=20&lr=0.001&batch_size=128&dataset=all
 { "type": "epoch",        "epoch": 5, "epochs": 20, "train_loss": 0.12, "val_loss": 0.09, "train_acc": 94.5, "val_acc": 96.2 }
 { "type": "best_model",   "val_loss": 0.08, "epoch": 8 }
 { "type": "test_results", "test_loss": 0.09, "test_acc": 96.8, "y_true": [...], "y_pred": [...] }
-{ "type": "complete",     "model_path": "models/best_model.pt" }
+{ "type": "complete",     "model_path": "models/sudoku_mnist-fonts_lr0p001_bs128_ep20.pt" }
 { "type": "error",        "message": "..." }
 ```
+
+Training checkpoints are named from the run configuration:
+
+```txt
+sudoku_{dataset}_lr{learning_rate}_bs{batch_size}_ep{epochs}.pt
+```
+
+The backend also writes `models/latest_model.txt` so model info, optimization, inference reloads, and downloads can resolve the latest trained checkpoint without relying on a generic `best_model.pt` filename.
 
 Returns **HTTP 409** if training is already in progress.
 
@@ -151,8 +159,8 @@ Exports the model to TorchScript and ONNX, runs a CPU inference benchmark.
 ```json
 {
   "success": true,
-  "torchscript_path": "models/best_model.ts",
-  "onnx_path": "models/best_model.onnx",
+  "torchscript_path": "models/sudoku_mnist-fonts_lr0p001_bs128_ep20.ts",
+  "onnx_path": "models/sudoku_mnist-fonts_lr0p001_bs128_ep20.onnx",
   "benchmark": {
     "pytorch_ms": 2.1,
     "torchscript_ms": 1.8,

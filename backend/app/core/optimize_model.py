@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from typing import Any
 
+from app.core.model_files import artifact_path_for_model
+
 
 def run_optimization_and_benchmark(
     base_model: nn.Module,
@@ -38,7 +40,8 @@ def run_optimization_and_benchmark(
     })
 
     # 2. TorchScript Export & Benchmark
-    ts_path = os.path.join(models_dir, 'best_model.ts')
+    os.makedirs(models_dir, exist_ok=True)
+    ts_path = artifact_path_for_model(model_path, ".ts")
     traced_model = torch.jit.trace(base_model, dummy_input)
     traced_model.save(ts_path)
     ts_size_mb = os.path.getsize(ts_path) / (1024 * 1024)
@@ -59,7 +62,7 @@ def run_optimization_and_benchmark(
     })
 
     # 3. ONNX Export & Benchmark
-    onnx_path = os.path.join(models_dir, 'best_model.onnx')
+    onnx_path = artifact_path_for_model(model_path, ".onnx")
     torch.onnx.export(
         base_model, dummy_input, onnx_path,
         export_params=True, opset_version=11,

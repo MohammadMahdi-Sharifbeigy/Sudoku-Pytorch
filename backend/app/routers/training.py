@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.core.model import DigitCNN, FocalLoss
 from app.core.train import train_epoch, validate, collect_predictions
 from app.core.data_utils import get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all
+from app.core.model_files import build_training_model_path, write_latest_model_pointer
 
 router = APIRouter()
 
@@ -47,6 +48,7 @@ def _run_training_thread(
     model: DigitCNN,
     device: torch.device,
     model_path: str,
+    models_dir: str,
     data_path: str,
     epochs: int,
     learning_rate: float,
@@ -87,6 +89,7 @@ def _run_training_thread(
                 model_dir = os.path.dirname(os.path.abspath(model_path))
                 os.makedirs(model_dir, exist_ok=True)
                 torch.save(model.state_dict(), model_path)
+                write_latest_model_pointer(models_dir, model_path)
                 emit({"type": "best_model", "val_loss": round(val_loss, 6), "epoch": epoch})
 
         test_loss, test_acc = validate(model, test_loader, criterion, device)
@@ -164,7 +167,15 @@ async def train_stream(
         _is_training = True
 
     device: torch.device = request.app.state.device
-    model_path: str = request.app.state.model_path
+    models_dir: str = request.app.state.models_dir
+    model_path = build_training_model_path(
+        models_dir,
+        dataset_mode,
+        learning_rate,
+        batch_size,
+        epochs,
+    )
+    request.app.state.model_path = model_path
     data_path: str = request.app.state.data_path
 
     # Fresh model for training — don't mutate the live inference model.
@@ -180,6 +191,7 @@ async def train_stream(
         train_model,
         device,
         model_path,
+        models_dir,
         data_path,
         epochs,
         learning_rate,
