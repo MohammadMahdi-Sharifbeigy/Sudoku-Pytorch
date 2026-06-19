@@ -22,6 +22,7 @@ class ConfidenceStats(BaseModel):
 
 class SolveResponse(BaseModel):
     success: bool
+    detector_used: str = "classical"
     solved: bool
     original_grid: list[list[int]]
     solved_board: Optional[list[list[int]]]
@@ -67,3 +68,22 @@ class ErrorResponse(BaseModel):
     success: bool = False
     error: str
     detail: Optional[str] = None
+
+
+class ModelEntry(BaseModel):
+    id: str
+    filename: str
+    size_mb: float
+    created_at: str
+    is_default: bool
+
+
+class ModelList(BaseModel):
+    models: list[ModelEntry]
+
+
+class YoloTrainingConfig(BaseModel):
+    epochs: int = Field(default=100, ge=1, le=500)
+    imgsz: int = Field(default=640, ge=64, le=1280)
+    batch: int = Field(default=8, ge=1, le=128)
+    model_seed: str = Field(default="yolov8s-pose.pt")

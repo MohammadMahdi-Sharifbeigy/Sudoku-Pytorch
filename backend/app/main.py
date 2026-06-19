@@ -25,6 +25,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     model.to(device)
     model.eval()
 
+    app.state.cnn_cache = {}
+    app.state.yolo_cache = {}
+
+    from app.core.registry.yolo_models import default_yolo_id, load_yolo_weights
+    app.state.yolo_model = None
+    app.state.yolo_model_id = None
+    yolo_env = os.environ.get("YOLO_MODEL_PATH")
+    if yolo_env and os.path.exists(yolo_env):
+        try:
+            from app.core.vision import load_yolo_model
+            app.state.yolo_model = load_yolo_model(yolo_env, device)
+            app.state.yolo_model_id = yolo_env
+        except Exception:
+            app.state.yolo_model = None
+    else:
+        yid = default_yolo_id(models_dir)
+        if yid is not None:
+            try:
+                app.state.yolo_model = load_yolo_weights(models_dir, yid, device, app.state.yolo_cache)
+                app.state.yolo_model_id = yid
+            except Exception:
+                app.state.yolo_model = None
+
     app.state.model = model
     app.state.device = device
     app.state.model_path = model_path
