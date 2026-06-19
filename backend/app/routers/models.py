@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi import APIRouter, Query, Request, HTTPException
 from fastapi.responses import FileResponse
 
-from app.core.model_files import artifact_path_for_model, latest_model_path
+from app.core.registry.model_files import artifact_path_for_model, latest_model_path
 
 router = APIRouter()
 

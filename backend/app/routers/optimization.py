@@ -7,7 +7,7 @@ import torch
 from fastapi import APIRouter, Request, HTTPException
 
 from app.core.model import DigitCNN
-from app.core.model_files import latest_model_path
+from app.core.registry.model_files import latest_model_path
 from app.core.optimize_model import run_optimization_and_benchmark
 from app.schemas import BenchmarkResult, BenchmarkEntry, ModelInfo
 

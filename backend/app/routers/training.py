@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.core.model import DigitCNN, FocalLoss
 from app.core.train import train_epoch, validate, collect_predictions
 from app.core.data_utils import get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all
-from app.core.model_files import build_training_model_path, write_latest_model_pointer
+from app.core.registry.model_files import build_training_model_path, write_latest_model_pointer
 
 router = APIRouter()
 

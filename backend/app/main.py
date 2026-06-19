@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.model import DigitCNN
-from app.core.model_files import latest_model_path
+from app.core.registry.model_files import latest_model_path
 from app.routers import inference, training, optimization, models as models_router
 
 

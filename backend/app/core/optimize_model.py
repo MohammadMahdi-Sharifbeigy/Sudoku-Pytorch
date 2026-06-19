@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from typing import Any
 
-from app.core.model_files import artifact_path_for_model
+from app.core.registry.model_files import artifact_path_for_model
 
 
 def run_optimization_and_benchmark(
