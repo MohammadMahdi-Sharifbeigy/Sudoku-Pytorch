@@ -1,28 +1,76 @@
-# YOLOv8 Grid Detection + Model Selection — Design
+# YOLOv8-Pose Grid Corner Detection + Model Selection — Design
 
-Date: 2026-06-20
+Date: 2026-06-20 (revised — switched detection → pose)
 Branch: `fullapp`
-Status: Approved
+Status: Approved (pose revision)
 
 ## Goal
 
-Upgrade the Sudoku solver's grid-extraction step from classical CV (adaptive
-threshold + contours) to an optional YOLOv8 detector that is robust to shadows,
-noise, and warped paper. Add per-request model selection (CNN + YOLO) across the
-backend and frontend, plus YOLO training from both a CLI script and the web UI.
+Upgrade the Sudoku solver's grid-extraction step to a **YOLOv8-pose** model that
+predicts the **4 corner keypoints** of the Sudoku grid directly. The 4 corners
+feed straight into the existing `perform_four_point_transform` — no bounding-box
+contour refinement needed. Add per-request CNN/YOLO model selection across
+backend + frontend, plus pose training from a CLI script and an in-app SSE
+endpoint.
 
-Classical detection remains as a fallback and a selectable mode.
+Classical contour detection is kept as a selectable fallback (auto-fallback when
+pose finds no grid).
+
+## Why pose (key finding)
+
+The dataset labels (`data/Sudoku-Detector.yolov8/*/labels/*.txt`) are **already
+4-corner annotations** — each line is 9 columns:
+`class x1 y1 x2 y2 x3 y3 x4 y4` (normalized polygon, one grid per image; 18 train
+/ 5 val / 2 test). Pose training needs a different label layout
+(`class cx cy w h px1 py1 v1 …`), so a one-time **label conversion** produces a
+pose dataset. The seed weights `models/yolov8s-pose.pt` are already present.
 
 ## Decisions (locked)
 
-- **Detector mode:** selectable `classical | yolo`. Default = `yolo` when a YOLO
-  model is loaded, else `classical`. YOLO path auto-falls-back to classical on
-  detection failure.
-- **YOLO training:** both a CLI script and an in-app SSE endpoint + frontend tab.
-- **Model picker:** two dropdowns — CNN checkpoints and YOLO weights — on the
-  solve page. Optimize page gets the CNN dropdown only.
-- **Restructure:** reorganize `vision` and model-file helpers into packages.
-- **Dataset location:** `data/Sudoku-Detector.yolov8/` (moved under `data/`).
+- **Detector:** YOLOv8-pose predicts 4 corners directly. Default = `yolo` when
+  pose weights are loaded, else `classical`. Pose auto-falls-back to classical on
+  detection failure. Classical toggle stays.
+- **Label conversion:** `scripts/convert_labels_to_pose.py` converts the existing
+  4-point labels into pose format under a **new** `data/sudoku_pose/` dataset
+  (original dataset untouched).
+- **Corner order:** geometrically canonicalize each label to **TL, TR, BR, BL**
+  (sum/diff of coords) so the pose model learns stable keypoint slots.
+- **Seed weights:** fine-tune from `models/yolov8s-pose.pt`.
+- **Model picker:** two dropdowns (CNN checkpoints + pose weights) on solve;
+  CNN-only on optimize.
+- **Restructure:** `vision/` package (`common`, `classical`, `yolo`) + `registry/`
+  package (model files, CNN list, pose list).
+- **Dataset source:** `data/Sudoku-Detector.yolov8/` (4-point polygon labels).
+
+## Label conversion
+
+`scripts/convert_labels_to_pose.py`:
+1. Read each `Sudoku-Detector.yolov8/{train,valid,test}/labels/*.txt`.
+2. Parse `class` + 4 normalized `(x,y)` points.
+3. **Canonicalize order** to TL,TR,BR,BL:
+   - `s = x + y` → TL = argmin(s), BR = argmax(s)
+   - `d = x - y` → TR = argmax(d), BL = argmin(d)
+4. **Bbox** from the 4 points: `xmin..xmax, ymin..ymax` →
+   `cx, cy, w, h` (normalized, clamped to [0,1]).
+5. Write pose label line (kpt_shape `[4,3]`, visibility `2`):
+   `class cx cy w h  x1 y1 2  x2 y2 2  x3 y3 2  x4 y4 2` (17 cols).
+6. Copy/symlink images into `data/sudoku_pose/{train,valid,test}/images/` and
+   write `data/sudoku_pose/data.yaml`:
+   ```yaml
+   path: .
+   train: train/images
+   val: valid/images
+   test: test/images
+   kpt_shape: [4, 3]
+   flip_idx: [1, 0, 3, 2]   # horizontal flip swaps TL<->TR, BR<->BL
+   names:
+     0: sudoku
+   ```
+   `flip_idx` keeps left/right-mirror augmentation consistent with the corner
+   order.
+
+The script is idempotent (overwrites the output dataset) and prints per-split
+counts.
 
 ## Architecture
 
@@ -31,42 +79,39 @@ Classical detection remains as a fallback and a selectable mode.
 ```
 backend/app/core/
   vision/
-    __init__.py     # re-exports every symbol inference.py imports (back-compat)
+    __init__.py     # re-exports public API (back-compat)
     common.py       # detector-agnostic helpers
-    classical.py    # contour-based detection (existing logic, relocated)
-    yolo.py         # YOLO detection + cell extraction
+    classical.py    # contour detector (relocated, unchanged logic)
+    yolo.py         # pose corner detection + cell extraction
   registry/
     __init__.py
-    model_files.py  # relocated from core/ (filenames, pointers, artifact paths)
-    cnn_models.py   # list CNN checkpoints + path-keyed cached loader
-    yolo_models.py  # list YOLO weights + path-keyed cached loader
-  train_yolo.py     # core ultralytics trainer (shared by CLI + endpoint)
+    model_files.py  # relocated from core/
+    cnn_models.py   # list + cached-load CNN checkpoints
+    yolo_models.py  # list + cached-load pose weights
+  train_yolo.py     # ultralytics pose trainer (shared CLI + endpoint)
   model.py, solver.py, train.py, optimize_model.py, data_utils.py, report_utils.py
 ```
 
-`vision/__init__.py` re-exports all names so existing
-`from app.core.vision import ...` imports keep working. `registry/model_files.py`
-move requires updating imports in `main.py`, `routers/training.py`,
-`routers/models.py`, `routers/optimization.py`.
+`vision/__init__.py` re-exports every symbol the routers import.
+`registry/model_files.py` move updates imports in `main.py`,
+`routers/{training,models,optimization}.py`.
 
 ### vision/common.py (detector-agnostic)
 
-Holds everything both detectors share:
 `resize_and_maintain_aspect_ratio`, `apply_grayscale_blur_and_threshold`,
 `get_quadrilateral_points_in_order`, `perform_four_point_transform`,
 `center_and_resize_digit`, `check_for_digit_in_cell_image`, `_bbox_iou`, `_nms`,
-`_contour_to_quad`, `slice_grid_into_cells`, `sort_cells_into_grid`,
+`_contour_to_quad`, `locate_cells_within_grid`, `sort_cells_into_grid`,
 `build_grid_from_partial_cells`, `_clear_border_components`,
-`get_predicted_sudoku_grid_torch`, `get_per_cell_predictions`,
-`plot_cell_images_in_grid`, `generate_solution_image`.
+`slice_grid_into_cells`, `get_predicted_sudoku_grid_torch`,
+`get_per_cell_predictions`, `plot_cell_images_in_grid`, `generate_solution_image`.
 
 ### vision/classical.py
 
-`find_grid_contour_candidates`, `locate_cells_within_grid`, and
-`get_cells_classical` (renamed from `get_valid_cells_from_image`; old name kept
-as an alias in `__init__.py`).
+`find_grid_contour_candidates`, `get_cells_classical` (renamed from
+`get_valid_cells_from_image`; legacy alias kept in `__init__.py`).
 
-### vision/yolo.py
+### vision/yolo.py (pose)
 
 ```python
 def load_yolo_model(weights_path: str, device: torch.device) -> "YOLO": ...
@@ -74,164 +119,125 @@ def load_yolo_model(weights_path: str, device: torch.device) -> "YOLO": ...
 def get_grid_corners_yolo(
     img: np.ndarray, yolo_model: "YOLO", conf: float = 0.25
 ) -> np.ndarray:
-    """Detect grid bbox, refine to 4 exact corners, return ordered TL,TR,BR,BL."""
+    """Run pose inference, take the highest-confidence instance's 4 keypoints,
+    order them TL,TR,BR,BL, return float32 (4,2). Raise ValueError if none."""
 
 def get_cells_yolo(
     img: np.ndarray, yolo_model: "YOLO", grid_size: int = 576
 ) -> tuple[list[dict], np.ndarray, np.ndarray]:
-    """corners -> square warp -> cells. Same tuple shape as classical path."""
+    """corners -> square warp -> 81 cells. Same tuple shape as classical."""
 ```
 
-**`get_grid_corners_yolo` logic:**
-1. `yolo_model.predict(img, conf=conf, verbose=False)` → pick highest-confidence
-   box. Raise `ValueError("YOLO found no grid")` if none.
-2. bbox `(x1,y1,x2,y2)` → pad ~3% of bbox size, clamp to image bounds.
-3. **Corner refinement within bbox** (per rule 3): crop the padded region →
-   grayscale → `apply_grayscale_blur_and_threshold` → largest external contour →
-   `cv2.minAreaRect` (or `_contour_to_quad` convex-hull extreme points) → 4 exact
-   corners mapped back to full-image coords. If the contour is too small/weak
-   (area < ~40% of bbox), fall back to the 4 axis-aligned bbox corners.
-4. Order via `get_quadrilateral_points_in_order`, return `np.float32` (4,2).
+**`get_grid_corners_yolo` logic (simpler than bbox approach):**
+1. `yolo_model.predict(img, conf=conf, verbose=False)`.
+2. From `results[0].keypoints`, pick the instance with the highest box conf.
+   Extract its 4 `(x,y)` keypoints in pixel coords (`keypoints.xy`).
+3. If no instance / fewer than 4 keypoints → `ValueError("YOLO-pose found no grid")`.
+4. Order via `get_quadrilateral_points_in_order` (defensive — model is trained on
+   canonical order, but ordering guarantees correctness). Return float32 (4,2).
 
-**`get_cells_yolo` logic:**
-- `M, grid_sq = perform_four_point_transform(img, corners, size=grid_size)`
-- Try `locate_cells_within_grid(grid_sq)`; if 81 cells → use it (true centroids).
-  Else if ≥54 → `build_grid_from_partial_cells`. Else → `slice_grid_into_cells`
-  (deterministic fallback, primary per task description).
-- Return `(cells, M, grid_sq)`.
+**`get_cells_yolo`:** `M, grid_sq = perform_four_point_transform(img, corners,
+size=grid_size)`; then `locate_cells_within_grid` → (81 → use; ≥54 →
+`build_grid_from_partial_cells`; else `slice_grid_into_cells`). Returns
+`(cells, M, grid_sq)`.
 
-### Detector selection in the pipeline
+> The bbox→corner `refine_corners_within_bbox` from the detection design is
+> **removed** — pose gives corners directly.
 
-`routers/inference._run_pipeline` becomes detector-aware:
+### Detector selection (unchanged from prior design)
 
-```python
-def _run_pipeline(img_bytes, cnn_model, device, detector, yolo_model) -> dict:
-    ...
-    if detector == "yolo" and yolo_model is not None:
-        try:
-            cells, M, board = get_cells_yolo(img, yolo_model)
-            detector_used = "yolo"
-        except Exception:
-            cells, M, board = get_cells_classical(img)
-            detector_used = "classical (yolo fallback)"
-    else:
-        cells, M, board = get_cells_classical(img)
-        detector_used = "classical"
-```
-
-`/api/solve` (multipart) gains optional form fields: `detector`, `cnn_model`,
-`yolo_model`. Default detector resolved server-side:
-`yolo` if `app.state.yolo_model` is loaded, else `classical`.
-
-CNN/YOLO models resolved by id through the registry's cached loaders
-(path-keyed, so repeated requests reuse the in-memory model). Unset ids → use
-`app.state` defaults. `SolveResponse` gains `detector_used: str`.
+`routers/inference._run_pipeline(img_bytes, cnn_model, device, detector,
+yolo_model)`: `detector == "yolo"` and a pose model loaded → `get_cells_yolo`
+with classical fallback on exception; else `get_cells_classical`. `/api/solve`
+gains optional form fields `detector`, `cnn_model`, `yolo_model`; default detector
+= `yolo` if pose model loaded else `classical`. `SolveResponse` gains
+`detector_used`.
 
 ### Model storage convention
 
-- CNN checkpoints: `models/*.pt` (excluding `yolov8s.pt`). Pointer
-  `models/latest_model.txt` (existing).
-- YOLO weights: `models/yolo/*.pt` plus seed `models/yolov8s.pt`. Pointer
+- CNN checkpoints: `models/*.pt` (excluding pose seed).
+- Pose weights: `models/yolo/*.pt` + seed `models/yolov8s-pose.pt`. Pointer
   `models/yolo/latest_yolo.txt`.
-- `GET /api/models/cnn` and `GET /api/models/yolo` →
+- `GET /api/models/cnn`, `GET /api/models/yolo` →
   `[{id, filename, size_mb, created_at, is_default}]`.
-  `id` = filename (validated: no separators / traversal).
 
-### YOLO training — CLI + in-app
+### Pose training — CLI + in-app
 
-`core/train_yolo.py`:
-```python
-def train_yolo(
-    data_yaml: str, seed_weights: str, epochs: int, imgsz: int, batch: int,
-    device: str, models_dir: str, on_epoch=None,
-) -> str:  # returns best-weights path
-```
-Uses `ultralytics.YOLO(seed_weights)`, registers an `on_train_epoch_end`
-callback that pulls `box_loss/cls_loss/mAP50` from the trainer and calls
-`on_epoch(metrics)`. Copies `runs/.../best.pt` → `models/yolo/sudoku_yolo_*.pt`
-and writes the pointer.
+`core/train_yolo.py: train_yolo(data_yaml, seed_weights, epochs, imgsz, batch,
+device, models_dir, on_epoch=None) -> best_path`. Uses
+`ultralytics.YOLO(seed_weights)` (task inferred = pose). Callback on
+`on_fit_epoch_end` emits `{epoch, epochs, box_loss, pose_loss, map50}` (pose mAP
+key `metrics/mAP50(P)`). Copies `best.pt` → `models/yolo/sudoku_pose_*.pt`,
+writes pointer.
 
-`scripts/train_yolo.py`: argparse wrapper. Defaults: `--data
-data/Sudoku-Detector.yolov8/data.yaml`, `--model models/yolov8s.pt`,
-`--epochs 50`, `--imgsz 640`, `--batch 16`, `--device auto`. Device auto-detect:
-`cuda` → `mps` → `cpu`.
+`scripts/train_yolo.py` (argparse): defaults `--data
+data/sudoku_pose/data.yaml`, `--model models/yolov8s-pose.pt`, `--epochs 100`
+(small dataset), `--imgsz 640`, `--batch 8`, `--device auto`. Device auto:
+`cuda → mps → cpu`.
 
-`GET /api/train/yolo/stream` (SSE): mirrors the existing CNN trainer pattern —
-thread-pool worker, `asyncio.Queue`, sentinel, 30s keepalive ping, concurrency
-guard (`_is_yolo_training`). Emits `{type:"epoch", box_loss, cls_loss, map50,
-epoch, epochs}`, `{type:"best_model"}`, `{type:"complete"}`, `{type:"error"}`.
-On completion reloads `app.state.yolo_model` from the new best weights.
+`GET /api/train/yolo/stream` (SSE): mirrors the CNN trainer pattern
+(thread-pool, queue, sentinel, keepalive, single-flight guard). Emits per-epoch
+pose metrics; on completion reloads `app.state.yolo_model`. Requires the pose
+dataset to exist (`data/sudoku_pose/data.yaml`); if missing → emit an error event
+telling the user to run the conversion script first.
 
-Optimize endpoint (`POST /api/optimize`) gains optional `cnn_model` (CNN-only).
+Optimize endpoint gains optional `cnn_model` (CNN-only).
 
-### data.yaml fix
+### App state / lifespan
 
-Current `data/Sudoku-Detector.yolov8/data.yaml` uses `train: ../train/images`,
-which resolved relative to the old repo-root location. Now nested under `data/`,
-rewrite to be self-rooted:
-```yaml
-path: .            # dir of this file
-train: train/images
-val: valid/images
-test: test/images
-nc: 1
-names: ['Sudoku-Detector']
-```
+Load default CNN as today. Resolve default pose weights: `YOLO_MODEL_PATH` env →
+`models/yolo/latest_yolo.txt` → newest `models/yolo/*.pt` → none. Add
+`app.state.yolo_model`, `yolo_model_id`, `cnn_cache`, `yolo_cache`.
 
-### App state / lifespan (`main.py`)
+### Schemas
 
-- Load default CNN as today.
-- Resolve default YOLO weights: `YOLO_MODEL_PATH` env, else
-  `models/yolo/latest_yolo.txt` pointer, else newest `models/yolo/*.pt`. If none,
-  `app.state.yolo_model = None` and the solve default falls to classical.
-- `app.state.cnn_cache = {}`, `app.state.yolo_cache = {}` (path-keyed loaders).
-
-### Schemas (`schemas.py`)
-
-Add `ModelEntry`, `ModelList`, `YoloTrainingConfig`. Extend `SolveResponse` with
-`detector_used: str`.
+Add `ModelEntry`, `ModelList`, `YoloTrainingConfig` (epochs, imgsz, batch,
+model_seed). Extend `SolveResponse` with `detector_used`.
 
 ## Frontend
 
-Skills: `frontend-design` + `ui-ux-pro-max` for new components; `caveman-review`
-as a final pass. Existing dark/cyan theme and Space-Mono accents preserved.
+Skills: `frontend-design` + `ui-ux-pro-max`; `caveman-review` final pass. Preserve
+the dark/cyan theme.
 
 - `lib/api.ts`: `listCnnModels`, `listYoloModels`,
   `solveSudoku(file, {detector, cnnModel, yoloModel})`, `yoloTrainingStreamUrl`,
-  `runOptimization({cnnModel})`. Extend `SolveResponse` with `detector_used`.
-- New `components/ui/ModelSelect.tsx` — themed dropdown (filename, size, "default"
-  badge), reused by solve + optimize.
-- **Solve page:** segmented detector toggle (Classical │ YOLO) + CNN dropdown +
-  YOLO dropdown (shown only when detector = YOLO). Show `detector_used` in the
-  result header.
-- **Optimize page:** CNN dropdown feeding `runOptimization`.
-- **Train page:** CNN │ YOLO sub-tab. YOLO form (epochs, imgsz, batch) + live
-  box-loss / mAP50 chart, reusing the SSE stream hook pattern.
+  `runOptimization(cnnModel?)`, `detector_used` plumbed through.
+- New `components/ui/ModelSelect.tsx` — themed dropdown reused by solve + optimize.
+- **Solve page:** Classical│YOLO toggle + CNN dropdown + pose-weights dropdown
+  (shown when YOLO). Show `detector_used` badge.
+- **Optimize page:** CNN dropdown.
+- **Train page:** Digit-CNN │ Grid-Pose sub-tab. Pose form (epochs, imgsz, batch)
+  + live box/pose-loss + mAP50 chart via SSE.
 
 ## Testing / verification
 
-- Backend: `python -c "import app.main"` import-smoke after the reorg;
-  `uvicorn` boot; `GET /api/models/cnn|yolo`; `/api/solve` with each detector on a
-  sample from `data/sudoku_images/`. `get_grid_corners_yolo` unit check on one
-  labeled image (corners inside bounds, 4 points).
-- `scripts/train_yolo.py --epochs 1` smoke (CPU) to confirm wiring + best-weights
-  copy + pointer.
-- Frontend: `npm run build` / lint; Playwright specs updated for new controls.
+- `convert_labels_to_pose.py`: unit test on a synthetic 4-point label →
+  asserts 17-col output, TL,TR,BR,BL order, bbox encloses all keypoints.
+- `get_grid_corners_yolo`: unit test with a fake pose result object exposing
+  `keypoints.xy` → returns ordered (4,2) corners; empty result raises.
+- vision back-compat import test; registry listing tests (CNN excludes pose seed;
+  pose list includes `yolo/` + seed).
+- Backend import-smoke + uvicorn boot + curl `/api/models/*` and `/api/solve`.
+- `scripts/convert_labels_to_pose.py` real run (tiny dataset) then
+  `scripts/train_yolo.py --epochs 1 --imgsz 320 --batch 2 --device cpu` wiring
+  smoke (best-weights copy + pointer).
+- Frontend `npm run lint && npm run build`; Playwright specs with mocked
+  `/api/models/*`.
 
 ## Risks
 
-- `ultralytics` is a heavy dependency (pulls its own torch pin) → add to
-  `backend/requirements.txt`, verify it coexists with the current torch.
-- YOLO SSE training is GPU/CPU intensive → single-flight concurrency guard.
-- `yolov8s.pt` (21 MB) is untracked (training seed) — keep local, document in
-  README; trained weights (`models/yolo/*.pt`) are small.
-- Back-compat: the `vision` package must re-export every symbol the routers
-  currently import; covered by the import-smoke test.
+- **Tiny dataset** (18 train / 5 val / 2 test) → pose accuracy will be limited;
+  rely on ultralytics augmentation, document that more data improves results.
+  This is a wiring/feature deliverable, not an accuracy guarantee.
+- `ultralytics` already in `requirements.txt` (8.4.71 installed) — no new dep.
+- Pose SSE training is GPU/CPU heavy → single-flight guard.
+- Corner-order canonicalization must match `flip_idx` `[1,0,3,2]`; both derived
+  from TL,TR,BR,BL — covered by the conversion unit test.
+- Back-compat: `vision` package must re-export every router import — covered by
+  the compat test.
 
 ## Out of scope
 
-- Replacing the backtracking solver or the DigitCNN architecture.
-- Retraining / benchmarking YOLO accuracy beyond a 1-epoch wiring smoke.
-- Dockerfile changes beyond adding the new dependency.
-</content>
-</invoke>
+- Replacing the backtracking solver or DigitCNN.
+- Achieving a target pose mAP (dataset is tiny; only a 1-epoch wiring smoke).
+- Auto-running label conversion at server start (explicit script step).

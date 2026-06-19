@@ -1,1 +1,1 @@
-sudoku_mnist-fonts_lr0p001_bs64_ep10.pt
+sudoku_all_lr0p001_bs256_ep20.pt

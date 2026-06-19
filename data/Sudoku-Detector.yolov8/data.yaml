@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['Sudoku-Detector']
+
+roboflow:
+  workspace: sudoku-grid-detection
+  project: sudoku-detector-iqrep
+  version: dataset
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/sudoku-grid-detection/sudoku-detector-iqrep/dataset/dataset
