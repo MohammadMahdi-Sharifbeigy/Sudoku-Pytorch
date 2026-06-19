@@ -5,8 +5,27 @@ from fastapi import APIRouter, Query, Request, HTTPException
 from fastapi.responses import FileResponse
 
 from app.core.registry.model_files import artifact_path_for_model, latest_model_path
+from app.schemas import ModelList, ModelEntry
+from app.core.registry.cnn_models import list_cnn_models
+from app.core.registry.yolo_models import list_yolo_models, default_yolo_id
+import os as _os
 
 router = APIRouter()
+
+
+@router.get("/models/cnn", response_model=ModelList)
+async def list_cnn(request: Request) -> ModelList:
+    models_dir = request.app.state.models_dir
+    default_path = latest_model_path(models_dir, request.app.state.model_path)
+    default_id = _os.path.relpath(default_path, models_dir).replace("\\", "/")
+    return ModelList(models=[ModelEntry(**m) for m in list_cnn_models(models_dir, default_id)])
+
+
+@router.get("/models/yolo", response_model=ModelList)
+async def list_yolo(request: Request) -> ModelList:
+    models_dir = request.app.state.models_dir
+    default_id = request.app.state.yolo_model_id or default_yolo_id(models_dir)
+    return ModelList(models=[ModelEntry(**m) for m in list_yolo_models(models_dir, default_id)])
 
 _FORMAT_MEDIA_TYPES: dict[str, str] = {
     "pt": "application/octet-stream",

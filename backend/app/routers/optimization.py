@@ -4,7 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Body
 
 from app.core.model import DigitCNN
 from app.core.registry.model_files import latest_model_path
@@ -26,10 +26,17 @@ def _run_benchmark(model_path: str, models_dir: str) -> list[dict]:
 
 
 @router.post("/optimize", response_model=BenchmarkResult)
-async def optimize(request: Request) -> BenchmarkResult:
+async def optimize(request: Request, cnn_model: str | None = Body(default=None, embed=True)) -> BenchmarkResult:
     models_dir: str = request.app.state.models_dir
-    model_path = latest_model_path(models_dir, request.app.state.model_path)
-    request.app.state.model_path = model_path
+    if cnn_model:
+        from app.core.registry.cnn_models import resolve_cnn_path
+        try:
+            model_path = str(resolve_cnn_path(models_dir, cnn_model))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    else:
+        model_path = latest_model_path(models_dir, request.app.state.model_path)
+        request.app.state.model_path = model_path
 
     if not os.path.exists(model_path):
         raise HTTPException(
