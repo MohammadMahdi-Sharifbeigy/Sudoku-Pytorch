@@ -1,0 +1,1 @@
+yolo/sudoku_pose_ep1_imgsz320.pt

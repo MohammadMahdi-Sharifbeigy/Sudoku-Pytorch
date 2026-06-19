@@ -1,4 +1,4 @@
-path: .
+path: C:/Users/The_Death/Documents/GitHub/Sudoku-Pytorch/data/sudoku_pose
 train: train/images
 val: valid/images
 test: test/images

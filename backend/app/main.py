@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.model import DigitCNN
 from app.core.registry.model_files import latest_model_path
-from app.routers import inference, training, optimization, models as models_router
+from app.routers import inference, training, optimization, models as models_router, yolo_training
 
 
 @asynccontextmanager
@@ -91,6 +91,7 @@ app.include_router(inference.router, prefix="/api")
 app.include_router(training.router, prefix="/api")
 app.include_router(optimization.router, prefix="/api")
 app.include_router(models_router.router, prefix="/api")
+app.include_router(yolo_training.router, prefix="/api")
 
 
 @app.get("/health")

@@ -12,7 +12,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.scripts_lib_pose import polygon_line_to_pose  # noqa: E402
 
-DATA_YAML = """path: .
+# `path` is written as the dataset's absolute directory: ultralytics resolves
+# `path` against its own settings/CWD (not the yaml's location), so a relative
+# `path: .` breaks when training is launched from a different directory.
+DATA_YAML_TEMPLATE = """path: {root}
 train: train/images
 val: valid/images
 test: test/images
@@ -44,7 +47,8 @@ def convert(src_root: Path, dst_root: Path) -> None:
                 shutil.copyfile(img, dst_img / img.name)
             n += 1
         print(f"[{split}] converted {n} label files")
-    (dst_root / "data.yaml").write_text(DATA_YAML)
+    yaml_text = DATA_YAML_TEMPLATE.format(root=dst_root.resolve().as_posix())
+    (dst_root / "data.yaml").write_text(yaml_text)
     print(f"Wrote {dst_root / 'data.yaml'}")
 
 
