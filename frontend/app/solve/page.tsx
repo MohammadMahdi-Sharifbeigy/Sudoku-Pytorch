@@ -3,7 +3,16 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
-import { solveSudoku, type SolveResponse, type CellData } from "@/lib/api";
+import {
+  solveSudoku,
+  listCnnModels,
+  listYoloModels,
+  type SolveResponse,
+  type CellData,
+  type Detector,
+  type ModelEntry,
+} from "@/lib/api";
+import { ModelSelect } from "@/components/ui/ModelSelect";
 import { CellGridSkeleton, SudokuBoardSkeleton } from "@/components/ui/Skeletons";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -188,6 +197,77 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/** Classical │ YOLO segmented toggle — matches TabBar pill style */
+const DETECTOR_OPTIONS: { id: Detector; label: string }[] = [
+  { id: "classical", label: "Classical" },
+  { id: "yolo",      label: "YOLO" },
+];
+
+function DetectorToggle({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: Detector;
+  onChange: (d: Detector) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span
+        className="text-caption"
+        style={{
+          color: "var(--fg-muted)",
+          fontFamily: "var(--font-space-mono), monospace",
+          fontSize: "11px",
+          letterSpacing: "0.06em",
+          textTransform: "uppercase",
+        }}
+      >
+        Grid detector
+      </span>
+      <div
+        role="radiogroup"
+        aria-label="Grid detector"
+        className="relative flex items-center gap-0.5 rounded-[var(--r-pill)] p-1"
+        style={{
+          background: "rgba(255,255,255,0.04)",
+          border: "1px solid var(--border-col)",
+          width: "fit-content",
+        }}
+      >
+        {DETECTOR_OPTIONS.map(({ id, label }) => {
+          const isActive = value === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              role="radio"
+              aria-checked={isActive}
+              disabled={disabled}
+              onClick={() => onChange(id)}
+              className="btn-press relative z-10 min-h-12 rounded-[var(--r-pill)] px-4 py-1.5 text-caption transition-all duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#00D4FF]"
+              style={{
+                background: isActive ? "var(--cyan)" : "transparent",
+                color: isActive ? "#0A0A0F" : "var(--fg-muted)",
+                fontWeight: isActive ? 600 : 400,
+                fontSize: "13px",
+                letterSpacing: isActive ? "-0.2px" : "-0.12px",
+                border: "none",
+                cursor: disabled ? "not-allowed" : "pointer",
+                opacity: disabled ? 0.55 : 1,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -605,8 +685,32 @@ export default function SolvePage() {
   const [loadingStep, setLoadingStep] = useState(0);
   const [activeTab, setActiveTab] = useState<Tab>("solution");
   const [error, setError]         = useState<string | null>(null);
+  const [detector, setDetector]   = useState<Detector>("yolo");
+  const [cnnModel, setCnnModel]   = useState<string | null>(null);
+  const [yoloModel, setYoloModel] = useState<string | null>(null);
+  const [cnnModels, setCnnModels] = useState<ModelEntry[]>([]);
+  const [yoloModels, setYoloModels] = useState<ModelEntry[]>([]);
   const abortRef                  = useRef<AbortController | null>(null);
   const stepTimerRef              = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  /* Fetch available models on mount (errors non-fatal → empty arrays) */
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+
+    listCnnModels(controller.signal)
+      .then((models) => { if (active) setCnnModels(models); })
+      .catch(() => { if (active) setCnnModels([]); });
+
+    listYoloModels(controller.signal)
+      .then((models) => { if (active) setYoloModels(models); })
+      .catch(() => { if (active) setYoloModels([]); });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
 
   /* Revoke object URL on unmount */
   useEffect(() => {
@@ -672,7 +776,15 @@ export default function SolvePage() {
     abortRef.current = new AbortController();
 
     try {
-      const data = await solveSudoku(file, abortRef.current.signal);
+      const data = await solveSudoku(
+        file,
+        {
+          detector,
+          cnnModel: cnnModel ?? undefined,
+          yoloModel: yoloModel ?? undefined,
+        },
+        abortRef.current.signal,
+      );
       const lowConfidenceCount = data.cells.filter((cell) => cell.value > 0 && cell.confidence < 0.5).length;
       setResult(data);
       setActiveTab("solution");
@@ -914,6 +1026,33 @@ export default function SolvePage() {
             )}
           </div>
 
+          {/* Detector + model selection */}
+          <div
+            className="flex flex-col gap-3 rounded-[var(--r-lg)] p-4"
+            style={{
+              background: "rgba(255,255,255,0.02)",
+              border: "1px solid var(--border-col)",
+            }}
+          >
+            <DetectorToggle value={detector} onChange={setDetector} disabled={loading} />
+            <ModelSelect
+              label="Digit model (CNN)"
+              models={cnnModels}
+              value={cnnModel}
+              onChange={setCnnModel}
+              disabled={loading}
+            />
+            {detector === "yolo" && (
+              <ModelSelect
+                label="Grid model (pose)"
+                models={yoloModels}
+                value={yoloModel}
+                onChange={setYoloModel}
+                disabled={loading}
+              />
+            )}
+          </div>
+
           {/* Solve controls */}
           <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
             <button
@@ -1034,6 +1173,23 @@ export default function SolvePage() {
                 >
                   Puzzle solved
                 </span>
+                {result.detector_used && (
+                  <span
+                    className="inline-flex items-center rounded-[var(--r-sm)] px-2 py-0.5"
+                    title="Grid detector used by the backend"
+                    style={{
+                      background: "rgba(0,212,255,0.08)",
+                      border: "1px solid rgba(0,212,255,0.2)",
+                      color: "#00D4FF",
+                      fontFamily: "var(--font-space-mono), monospace",
+                      fontSize: "10px",
+                      letterSpacing: "0.06em",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    {result.detector_used}
+                  </span>
+                )}
               </div>
               <TabBar active={activeTab} onChange={setActiveTab} />
             </div>

@@ -27,12 +27,15 @@ import {
   YAxis,
 } from "recharts";
 import { CodeBlock } from "@/components/ui/CodeBlock";
+import { ModelSelect } from "@/components/ui/ModelSelect";
 import { StatCard } from "@/components/ui/StatCard";
 import {
   getModelInfo,
+  listCnnModels,
   modelDownloadUrl,
   runOptimization,
   type BenchmarkEntry,
+  type ModelEntry,
   type ModelInfo,
 } from "@/lib/api";
 
@@ -310,6 +313,8 @@ export default function OptimizePage() {
   const [benchmarkState, setBenchmarkState] = useState<BenchmarkState>("idle");
   const [results, setResults] = useState<BenchmarkEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [cnnModels, setCnnModels] = useState<ModelEntry[]>([]);
+  const [cnnModel, setCnnModel] = useState<string | null>(null);
   const [openAccordions, setOpenAccordions] = useState<Record<AccordionId, boolean>>({
     torchscript: true,
     onnx: false,
@@ -354,6 +359,20 @@ export default function OptimizePage() {
     return () => controller.abort();
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+
+    listCnnModels(controller.signal)
+      .then((models) => { if (active) setCnnModels(models); })
+      .catch(() => { if (active) setCnnModels([]); });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
   const fastest = useMemo(() => {
     const measurable = results.filter((entry) => entry.latency_ms != null);
     if (!measurable.length) return null;
@@ -369,7 +388,7 @@ export default function OptimizePage() {
     setResults([]);
 
     try {
-      const data = await runOptimization();
+      const data = await runOptimization(cnnModel ?? undefined);
       setResults(data.results);
       setBenchmarkState("complete");
       toast.success("Model exported!");
@@ -505,6 +524,13 @@ export default function OptimizePage() {
             </div>
 
             <div className="mt-6 grid gap-3">
+              <ModelSelect
+                label="Model to optimize"
+                models={cnnModels}
+                value={cnnModel}
+                onChange={setCnnModel}
+                disabled={benchmarkState === "running"}
+              />
               <button
                 type="button"
                 onClick={handleBenchmark}

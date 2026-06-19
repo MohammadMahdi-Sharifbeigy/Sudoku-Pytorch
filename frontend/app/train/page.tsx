@@ -1,10 +1,12 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import {
   Activity,
   ArrowDownToLine,
   CheckCircle2,
+  Grid3x3,
   Play,
   RotateCcw,
   Sparkles,
@@ -15,11 +17,33 @@ import {
 } from "lucide-react";
 import { LossAccuracyChart } from "@/components/charts/LossAccuracyChart";
 import { StatCard } from "@/components/ui/StatCard";
+import { yoloTrainingStreamUrl } from "@/lib/api";
 import {
   type DatasetMode,
   type TrainingConfig,
   useTrainingStream,
 } from "@/hooks/useTrainingStream";
+
+type TrainMode = "cnn" | "pose";
+
+interface PoseConfig {
+  epochs: number;
+  imgsz: number;
+  batch: number;
+}
+
+interface PoseEpoch {
+  epoch: number;
+  box_loss: number;
+  pose_loss: number;
+  map50: number;
+}
+
+const POSE_DEFAULT_CONFIG: PoseConfig = {
+  epochs: 50,
+  imgsz: 640,
+  batch: 16,
+};
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const REPORT_URL = `${API_BASE}/api/reports/training_report.txt`;
@@ -166,7 +190,7 @@ function ConfusionMatrix({ matrix }: { matrix: number[][] }) {
   );
 }
 
-export default function TrainPage() {
+function CnnTrainingView() {
   const [config, setConfig] = useState<TrainingConfig>(DEFAULT_CONFIG);
   const {
     isTraining,
@@ -194,23 +218,8 @@ export default function TrainPage() {
   );
 
   return (
-    <div className="min-h-dvh overflow-hidden">
-      <style>{`
-        @keyframes train-button-pulse {
-          0%, 100% { box-shadow: 0 0 0 0 rgba(0,212,255,0.26), 0 18px 50px rgba(0,212,255,0.12); }
-          50% { box-shadow: 0 0 0 8px rgba(0,212,255,0), 0 22px 70px rgba(0,212,255,0.24); }
-        }
-        @keyframes train-progress {
-          from { transform: translateX(-30%); opacity: 0.35; }
-          to { transform: translateX(130%); opacity: 0; }
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .train-motion { animation: none !important; transition: none !important; transform: none !important; }
-        }
-      `}</style>
-
-      <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8 lg:py-12">
-        <div className="grid gap-6 lg:grid-cols-[minmax(360px,440px)_1fr]">
+    <>
+      <div className="grid gap-6 lg:grid-cols-[minmax(360px,440px)_1fr]">
           <GlassPanel className="p-5 sm:p-6">
             <div className="mb-7 flex items-start justify-between gap-4">
               <div>
@@ -483,6 +492,322 @@ export default function TrainPage() {
             </div>
           </GlassPanel>
         ) : null}
+    </>
+  );
+}
+
+type PoseStatus = "idle" | "streaming" | "complete" | "error";
+
+function PoseTrainingView() {
+  const [config, setConfig] = useState<PoseConfig>(POSE_DEFAULT_CONFIG);
+  const [series, setSeries] = useState<PoseEpoch[]>([]);
+  const [status, setStatus] = useState<PoseStatus>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const sourceRef = useRef<EventSource | null>(null);
+
+  const isStreaming = status === "streaming";
+  const latest = series.length ? series[series.length - 1] : null;
+  const progress = latest ? Math.min(100, (latest.epoch / config.epochs) * 100) : 0;
+
+  const closeSource = () => {
+    sourceRef.current?.close();
+    sourceRef.current = null;
+  };
+
+  useEffect(() => closeSource, []);
+
+  const startPoseTraining = () => {
+    if (isStreaming) return;
+
+    closeSource();
+    setSeries([]);
+    setError(null);
+    setStatus("streaming");
+
+    const source = new EventSource(
+      yoloTrainingStreamUrl({
+        epochs: config.epochs,
+        imgsz: config.imgsz,
+        batch: config.batch,
+      }),
+    );
+    sourceRef.current = source;
+
+    source.onmessage = (event) => {
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(event.data) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+
+      const type = payload.type;
+      if (type === "epoch") {
+        const next: PoseEpoch = {
+          epoch: Number(payload.epoch ?? 0),
+          box_loss: Number(payload.box_loss ?? 0),
+          pose_loss: Number(payload.pose_loss ?? 0),
+          map50: Number(payload.map50 ?? 0),
+        };
+        setSeries((current) => [...current, next]);
+      } else if (type === "complete") {
+        setStatus("complete");
+        toast.success("Pose training complete");
+        closeSource();
+      } else if (type === "error") {
+        const message = typeof payload.message === "string" ? payload.message : "Pose training failed";
+        setError(message);
+        setStatus("error");
+        toast.error(message);
+        closeSource();
+      }
+    };
+
+    source.onerror = () => {
+      // Ignore transient errors after a clean completion.
+      if (sourceRef.current !== source) return;
+      setError("Connection to the training stream was lost.");
+      setStatus("error");
+      toast.error("Pose training stream disconnected");
+      closeSource();
+    };
+  };
+
+  const numberField = (
+    key: keyof PoseConfig,
+    label: string,
+    detail: string,
+    min: number,
+    step = 1,
+  ) => (
+    <div>
+      <FieldLabel label={label} detail={detail} />
+      <input
+        type="number"
+        min={min}
+        step={step}
+        value={config[key]}
+        disabled={isStreaming}
+        onChange={(event) => setConfig((current) => ({ ...current, [key]: Number(event.target.value) }))}
+        className="mt-2 h-12 w-full rounded-[var(--r-pill)] border border-[#1E1E2E] bg-white/[0.045] px-5 text-[17px] text-white outline-none transition focus:border-[#00D4FF] focus:ring-4 focus:ring-[#00D4FF]/10 disabled:opacity-50"
+      />
+    </div>
+  );
+
+  return (
+    <div className="grid gap-6 lg:grid-cols-[minmax(360px,440px)_1fr]">
+      <GlassPanel className="p-5 sm:p-6">
+        <div className="mb-7 flex items-start justify-between gap-4">
+          <div>
+            <div className="mb-3 inline-flex items-center gap-2 rounded-[var(--r-pill)] border border-[#1E1E2E] bg-white/[0.035] px-3 py-1.5 text-caption text-[#00D4FF]">
+              <Grid3x3 className="size-3.5" />
+              Grid pose
+            </div>
+            <h1 className="text-display text-white">Pose training</h1>
+            <p className="mt-3 max-w-[34rem] text-body text-[#C8C8D4]/70">
+              Fine-tune the YOLO pose model that locates the four grid corners. Box and pose loss stream live per epoch.
+            </p>
+          </div>
+          <div className="hidden rounded-full border border-[#00D4FF]/20 bg-[#00D4FF]/10 p-3 sm:block">
+            <Grid3x3 className="size-5 text-[#00D4FF]" />
+          </div>
+        </div>
+
+        <div className="grid gap-5">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+            {numberField("epochs", "Epochs", "1-300", 1)}
+            {numberField("batch", "Batch", "min 1", 1)}
+          </div>
+
+          {numberField("imgsz", "Image size", "step 32", 64, 32)}
+
+          <button
+            type="button"
+            onClick={startPoseTraining}
+            disabled={isStreaming}
+            className="train-motion btn-press mt-1 flex h-14 w-full items-center justify-center gap-3 rounded-[var(--r-pill)] bg-[#00D4FF] px-6 text-[17px] font-bold text-[#0A0A0F] transition hover:-translate-y-0.5 hover:bg-[#1ADCFF] disabled:cursor-not-allowed disabled:opacity-90"
+            style={{ animation: isStreaming ? "train-button-pulse 1.8s ease-in-out infinite" : undefined }}
+          >
+            {isStreaming ? (
+              <>
+                <span className="relative flex h-3 w-3">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#0A0A0F] opacity-45" />
+                  <span className="relative inline-flex h-3 w-3 rounded-full bg-[#0A0A0F]" />
+                </span>
+                Training active
+              </>
+            ) : (
+              <>
+                <Play className="size-4 fill-[#0A0A0F]" />
+                Start pose training
+              </>
+            )}
+          </button>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-[var(--r-md)] border border-[#1E1E2E] bg-black/20 px-4 py-3">
+            <span className="text-caption text-[#C8C8D4]/60">Status</span>
+            <span className="inline-flex items-center gap-2 text-caption text-white">
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{
+                  background:
+                    status === "error"
+                      ? "#FF4560"
+                      : status === "complete"
+                        ? "#00E396"
+                        : isStreaming
+                          ? "#00D4FF"
+                          : "#5A5A7A",
+                }}
+              />
+              {status === "idle"
+                ? "Ready"
+                : status === "streaming"
+                  ? "Streaming epochs"
+                  : status === "complete"
+                    ? "Complete"
+                    : "Needs attention"}
+            </span>
+          </div>
+
+          {error ? (
+            <div className="flex items-start gap-3 rounded-[var(--r-md)] border border-[#FF4560]/25 bg-[#FF4560]/10 px-4 py-3 text-caption text-[#FFD0D7]" role="alert">
+              <WifiOff className="mt-0.5 size-4 shrink-0 text-[#FF4560]" />
+              {error}
+            </div>
+          ) : null}
+        </div>
+      </GlassPanel>
+
+      <GlassPanel className="flex min-h-[420px] flex-col p-5 sm:p-6">
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-[#5A5A7A]">
+              Pose progress
+            </p>
+            <h2 className="mt-1 font-mono text-2xl font-bold text-white">
+              {latest ? `Epoch ${latest.epoch}` : "Awaiting stream"}
+            </h2>
+          </div>
+          {latest ? (
+            <span className="inline-flex items-center gap-2 rounded-[var(--r-pill)] border border-[#00E396]/20 bg-[#00E396]/10 px-3 py-1.5 text-caption font-mono text-[#00E396]">
+              <Target className="size-3.5" />
+              mAP50 {formatMetric(latest.map50)}
+            </span>
+          ) : null}
+        </div>
+
+        <div className="mb-6">
+          <div className="mb-2 flex justify-between text-caption">
+            <span className="text-[#C8C8D4]/60">Completion</span>
+            <span className="font-mono text-white">{progress.toFixed(0)}%</span>
+          </div>
+          <div className="relative h-2 overflow-hidden rounded-full bg-white/[0.055]">
+            <div className="train-motion h-full rounded-full bg-[#00D4FF] transition-all duration-700 ease-out" style={{ width: `${progress}%` }} />
+            {isStreaming ? <span className="train-motion absolute inset-y-0 left-0 w-1/3 rounded-full bg-white/35" style={{ animation: "train-progress 1.6s ease-in-out infinite" }} /> : null}
+          </div>
+        </div>
+
+        {series.length ? (
+          <div className="train-motion animate-fade-up overflow-hidden rounded-[var(--r-lg)] border border-[#1E1E2E]">
+            <table className="w-full border-separate border-spacing-0">
+              <thead>
+                <tr className="bg-white/[0.04]">
+                  {["Epoch", "Box loss", "Pose loss", "mAP50"].map((heading) => (
+                    <th key={heading} className="px-4 py-3 text-left text-caption font-semibold text-[#5A5A7A]">
+                      {heading}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {series.map((row) => (
+                  <tr key={row.epoch} className="transition-colors hover:bg-white/[0.035]">
+                    <td className="border-t border-[#1E1E2E] px-4 py-3 font-mono text-white">{row.epoch}</td>
+                    <td className="border-t border-[#1E1E2E] px-4 py-3 font-mono text-[#00D4FF]">{formatMetric(row.box_loss)}</td>
+                    <td className="border-t border-[#1E1E2E] px-4 py-3 font-mono text-[#FFB800]">{formatMetric(row.pose_loss)}</td>
+                    <td className="border-t border-[#1E1E2E] px-4 py-3 font-mono text-[#00E396]">{formatMetric(row.map50)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-[var(--r-lg)] border border-dashed border-[#1E1E2E] bg-white/[0.02] p-8 text-center">
+            <Grid3x3 className="mb-4 size-8 text-[#00D4FF]" />
+            <h3 className="font-mono text-xl font-bold text-white">Metrics appear when training starts</h3>
+            <p className="mt-2 max-w-md text-caption text-[#C8C8D4]/60">
+              Each epoch event adds a row with box loss, pose loss, and mAP50.
+            </p>
+          </div>
+        )}
+      </GlassPanel>
+    </div>
+  );
+}
+
+const TRAIN_MODES: { id: TrainMode; label: string }[] = [
+  { id: "cnn", label: "Digit CNN" },
+  { id: "pose", label: "Grid Pose" },
+];
+
+export default function TrainPage() {
+  const [mode, setMode] = useState<TrainMode>("cnn");
+
+  return (
+    <div className="min-h-dvh overflow-hidden">
+      <style>{`
+        @keyframes train-button-pulse {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(0,212,255,0.26), 0 18px 50px rgba(0,212,255,0.12); }
+          50% { box-shadow: 0 0 0 8px rgba(0,212,255,0), 0 22px 70px rgba(0,212,255,0.24); }
+        }
+        @keyframes train-progress {
+          from { transform: translateX(-30%); opacity: 0.35; }
+          to { transform: translateX(130%); opacity: 0; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .train-motion { animation: none !important; transition: none !important; transform: none !important; }
+        }
+      `}</style>
+
+      <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8 lg:py-12">
+        <div
+          role="tablist"
+          aria-label="Training mode"
+          className="flex items-center gap-0.5 self-start rounded-[var(--r-pill)] p-1"
+          style={{
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid var(--border-col)",
+          }}
+        >
+          {TRAIN_MODES.map(({ id, label }) => {
+            const isActive = mode === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                onClick={() => setMode(id)}
+                className="btn-press relative z-10 min-h-12 rounded-[var(--r-pill)] px-5 py-1.5 text-caption transition-all duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#00D4FF]"
+                style={{
+                  background: isActive ? "var(--cyan)" : "transparent",
+                  color: isActive ? "#0A0A0F" : "var(--fg-muted)",
+                  fontWeight: isActive ? 600 : 400,
+                  fontSize: "13px",
+                  letterSpacing: isActive ? "-0.2px" : "-0.12px",
+                  border: "none",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {mode === "cnn" ? <CnnTrainingView /> : <PoseTrainingView />}
       </div>
     </div>
   );
