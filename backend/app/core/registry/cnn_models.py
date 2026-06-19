@@ -48,8 +48,13 @@ def load_cnn_model(models_dir: str, model_id: str, device: torch.device, cache: 
     key = str(path)
     if key in cache:
         return cache[key]
-    model = DigitCNN(num_classes=10)
-    model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
-    model.to(device).eval()
+    try:
+        model = DigitCNN(num_classes=10)
+        model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+        model.to(device).eval()
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"Failed to load CNN model {model_id!r}: {exc}")
     cache[key] = model
     return model

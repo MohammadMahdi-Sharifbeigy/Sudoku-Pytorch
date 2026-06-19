@@ -63,8 +63,13 @@ def load_yolo_weights(models_dir: str, model_id: str, device: torch.device, cach
     key = str(path)
     if key in cache:
         return cache[key]
-    model = YOLO(str(path))
-    model.to(device)
+    try:
+        model = YOLO(str(path))
+        model.to(device)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"Failed to load YOLO model {model_id!r}: {exc}")
     cache[key] = model
     return model
 

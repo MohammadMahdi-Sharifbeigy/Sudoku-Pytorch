@@ -1,16 +1,19 @@
 import asyncio
 import base64
 import copy
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, File, Request, UploadFile, HTTPException
+import torch
+from fastapi import APIRouter, File, Form, Request, UploadFile, HTTPException
 
 from app.core.vision import (
     resize_and_maintain_aspect_ratio,
     apply_grayscale_blur_and_threshold,
-    get_valid_cells_from_image,
+    get_cells_classical,
+    get_cells_yolo,
     get_per_cell_predictions,
     get_predicted_sudoku_grid_torch,
     plot_cell_images_in_grid,
@@ -22,6 +25,8 @@ from app.schemas import (
     ConfidenceStats,
     SolveResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -45,7 +50,13 @@ def _encode_cell_b64(cell_img: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
-def _run_pipeline(img_bytes: bytes, model, device) -> dict:  # type: ignore[type-arg]
+def _run_pipeline(
+    img_bytes: bytes,
+    model: torch.nn.Module,
+    device: torch.device,
+    detector: str,
+    yolo_model: object | None,
+) -> dict:
     """Full inference pipeline — runs in thread pool to avoid blocking event loop."""
     arr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -55,7 +66,17 @@ def _run_pipeline(img_bytes: bytes, model, device) -> dict:  # type: ignore[type
     img = resize_and_maintain_aspect_ratio(img, new_width=1000)
     threshold_image = apply_grayscale_blur_and_threshold(img)
 
-    cells, M, board_image = get_valid_cells_from_image(img)
+    if detector == "yolo" and yolo_model is not None:
+        try:
+            cells, M, board_image = get_cells_yolo(img, yolo_model)
+            detector_used = "yolo"
+        except Exception:
+            logger.warning("YOLO detection failed, falling back to classical", exc_info=True)
+            cells, M, board_image = get_cells_classical(img)
+            detector_used = "classical (yolo fallback)"
+    else:
+        cells, M, board_image = get_cells_classical(img)
+        detector_used = "classical"
     cell_grid_image = plot_cell_images_in_grid(cells)
 
     per_cell_info = get_per_cell_predictions(model, cells, device)
@@ -107,11 +128,18 @@ def _run_pipeline(img_bytes: bytes, model, device) -> dict:  # type: ignore[type
         board_image_b64=board_image_b64,
         threshold_image_b64=_encode_image_b64(threshold_image),
         cell_grid_image_b64=_encode_image_b64(cell_grid_image),
+        detector_used=detector_used,
     )
 
 
 @router.post("/solve", response_model=SolveResponse)
-async def solve(request: Request, image: UploadFile = File(...)) -> SolveResponse:
+async def solve(
+    request: Request,
+    image: UploadFile = File(...),
+    detector: str | None = Form(default=None),
+    cnn_model: str | None = Form(default=None),
+    yolo_model: str | None = Form(default=None),
+) -> SolveResponse:
     if image.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
@@ -125,18 +153,33 @@ async def solve(request: Request, image: UploadFile = File(...)) -> SolveRespons
             detail=f"File too large ({len(img_bytes) / 1024 / 1024:.1f} MB). Max 10 MB.",
         )
 
-    model = request.app.state.model
     device = request.app.state.device
+    models_dir = request.app.state.models_dir
+
+    model = request.app.state.model
+    if cnn_model:
+        from app.core.registry.cnn_models import load_cnn_model
+        try:
+            model = load_cnn_model(models_dir, cnn_model, device, request.app.state.cnn_cache)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    yolo = request.app.state.yolo_model
+    if yolo_model:
+        from app.core.registry.yolo_models import load_yolo_weights
+        try:
+            yolo = load_yolo_weights(models_dir, yolo_model, device, request.app.state.yolo_cache)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    if detector not in (None, "classical", "yolo"):
+        raise HTTPException(status_code=400, detail=f"Invalid detector '{detector}'.")
+    chosen = detector or ("yolo" if yolo is not None else "classical")
 
     loop = asyncio.get_running_loop()
-
     try:
         result = await loop.run_in_executor(
-            _executor,
-            _run_pipeline,
-            img_bytes,
-            model,
-            device,
+            _executor, _run_pipeline, img_bytes, model, device, chosen, yolo
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
