@@ -39,6 +39,24 @@ async function mockTrainingStream(page: import("@playwright/test").Page) {
   });
 }
 
+test("grid pose tab reveals pose-specific fields", async ({ page }) => {
+  await page.goto("/train");
+
+  const poseTab = page.getByRole("tab", { name: "Grid Pose" });
+  await expect(poseTab).toBeVisible();
+
+  // CNN view is active by default — pose-only fields are absent.
+  await expect(page.getByText("Image size")).toHaveCount(0);
+
+  await poseTab.click();
+  await expect(poseTab).toHaveAttribute("aria-selected", "true");
+
+  // Pose view exposes the imgsz + batch fields.
+  await expect(page.getByText("Image size")).toBeVisible();
+  await expect(page.getByText("Batch", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start pose training" })).toBeVisible();
+});
+
 test("start training and verify SSE chart updates", async ({ page }) => {
   await mockTrainingStream(page);
   await page.goto("/train");

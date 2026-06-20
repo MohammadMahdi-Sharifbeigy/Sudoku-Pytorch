@@ -43,6 +43,7 @@ cp .env.example .env
 | `DATA_PATH` | `data` | Path to training data directory |
 | `DEVICE` | `cpu` | Inference device (`cpu` or `cuda`) |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
+| `YOLO_MODEL_PATH` | _(unset)_ | Force a specific YOLOv8-pose checkpoint for grid detection |
 
 > Paths are relative to the **repository root**, not the `backend/` directory, because the backend mounts `../models` and `../data` at runtime.
 
@@ -188,6 +189,26 @@ Download a model file.
 ### GET `/api/reports/{filename}`
 
 Download a saved report file (e.g., `training_report.txt`).
+
+---
+
+## Grid detection: YOLOv8-pose
+
+In addition to the classical OpenCV contour pipeline, the grid corners can be
+located with a YOLOv8-pose model. Convert the 4-corner polygon labels and train
+from `backend/`:
+
+```bash
+.venv/Scripts/python.exe scripts/convert_labels_to_pose.py
+.venv/Scripts/python.exe scripts/train_yolo.py --epochs 100 --imgsz 640 --batch 8 --device auto
+```
+
+Best weights land in `models/yolo/sudoku_pose_*.pt` with the pointer
+`models/yolo/latest_yolo.txt`. Pose becomes the default detector once trained
+weights exist; set `YOLO_MODEL_PATH` to override, and the backend auto-falls back
+to classical on failure. See the [root README](../README.md#grid-detection-yolov8-pose)
+for the full workflow, the in-app **Grid Pose** training tab, and per-request
+model selection.
 
 ---
 
