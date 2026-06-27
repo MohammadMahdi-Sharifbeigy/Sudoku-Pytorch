@@ -1,7 +1,7 @@
-task: pose
+task: detect
 mode: train
-model: ../models\yolov8s-pose.pt
-data: ../data\sudoku_pose\data.yaml
+model: ../models\yolov8s.pt
+data: ../data\sudoku_detect\data.yaml
 epochs: 50
 time: null
 patience: 100

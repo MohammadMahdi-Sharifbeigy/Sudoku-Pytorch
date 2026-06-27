@@ -29,7 +29,7 @@ def _worker(data_yaml, seed, epochs, imgsz, batch, device, models_dir, queue, lo
     try:
         out = train_yolo(data_yaml=data_yaml, seed_weights=seed, epochs=epochs,
                          imgsz=imgsz, batch=batch, device=device, models_dir=models_dir,
-                         on_epoch=lambda m: emit({"type": "epoch", **m}))
+                          on_epoch=lambda m: emit({"type": "epoch", **m}))
         emit({"type": "complete", "model_path": out})
     except Exception as exc:
         emit({"type": "error", "message": str(exc)})
@@ -81,7 +81,7 @@ async def train_yolo_stream(
     epochs: int = Query(default=100, ge=1, le=500),
     imgsz: int = Query(default=640, ge=64, le=1280),
     batch: int = Query(default=8, ge=1, le=128),
-    model_seed: str = Query(default="yolov8s-pose.pt"),
+    model_seed: str = Query(default="yolov8s.pt"),
 ) -> StreamingResponse:
     global _is_yolo_training
     async with _get_lock():
@@ -91,10 +91,10 @@ async def train_yolo_stream(
 
     models_dir = request.app.state.models_dir
     data_root = request.app.state.data_path
-    data_yaml = os.path.join(data_root, "sudoku_pose", "data.yaml")
+    data_yaml = os.path.join(data_root, "sudoku_detect", "data.yaml")
     if not os.path.exists(data_yaml):
         async def _err():
-            yield f"data: {json.dumps({'type':'error','message':'Pose dataset missing. Run scripts/convert_labels_to_pose.py first.'})}\n\n"
+            yield f"data: {json.dumps({'type':'error','message':'Detect dataset missing. Run scripts/convert_labels_to_detect.py first.'})}\n\n"
         _is_yolo_training = False
         return StreamingResponse(_err(), media_type="text/event-stream")
 

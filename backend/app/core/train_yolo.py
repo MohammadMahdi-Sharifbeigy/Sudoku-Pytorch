@@ -1,4 +1,4 @@
-"""Ultralytics YOLOv8-pose fine-tuning — shared by the CLI script and SSE endpoint."""
+"""Ultralytics YOLOv8-detect fine-tuning — shared by the CLI script and SSE endpoint."""
 from __future__ import annotations
 import shutil
 from pathlib import Path
@@ -22,7 +22,7 @@ def train_yolo(
 ) -> str:
     from ultralytics import YOLO
     resolved_device = pick_device(device)
-    model = YOLO(str(seed_weights))   # task=pose inferred from the seed
+    model = YOLO(str(seed_weights))   # task=detect inferred from the seed
 
     if on_epoch is not None:
         def _cb(trainer):
@@ -43,8 +43,9 @@ def train_yolo(
                 "epoch": epoch_num,
                 "epochs": int(epochs),
                 "box_loss": float(losses.get("train/box_loss", 0.0)),
-                "pose_loss": float(losses.get("train/pose_loss", 0.0)),
-                "map50": float(metrics.get("metrics/mAP50(P)", metrics.get("metrics/mAP50(B)", 0.0))),
+                "cls_loss": float(losses.get("train/cls_loss", 0.0)),
+                "dfl_loss": float(losses.get("train/dfl_loss", 0.0)),
+                "map50": float(metrics.get("metrics/mAP50(B)", 0.0)),
             })
         model.add_callback("on_fit_epoch_end", _cb)
 
@@ -56,7 +57,7 @@ def train_yolo(
     best = Path(results.save_dir) / "weights" / "best.pt"
     out_dir = Path(models_dir) / "yolo"
     out_dir.mkdir(parents=True, exist_ok=True)
-    dest = out_dir / f"sudoku_pose_ep{epochs}_imgsz{imgsz}.pt"
+    dest = out_dir / f"sudoku_detect_ep{epochs}_imgsz{imgsz}.pt"
     shutil.copyfile(best, dest)
     from app.core.registry.yolo_models import write_yolo_pointer
     write_yolo_pointer(models_dir, str(dest))

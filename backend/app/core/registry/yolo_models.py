@@ -1,11 +1,11 @@
-"""List + cached-load YOLOv8-pose weights (models/yolo/*.pt + seed yolov8s-pose.pt)."""
+"""List + cached-load YOLOv8-detect weights (models/yolo/*.pt + seed yolov8s.pt)."""
 from __future__ import annotations
 import datetime
 from pathlib import Path
 import torch
 
 YOLO_SUBDIR = "yolo"
-POSE_SEED_NAME = "yolov8s-pose.pt"
+DETECT_SEED_NAME = "yolov8s.pt"
 YOLO_POINTER = "yolo/latest_yolo.txt"
 
 
@@ -25,7 +25,7 @@ def list_yolo_models(models_dir: str, default_id: str | None = None) -> list[dic
     if not base.is_dir():
         return []
     paths = []
-    seed = base / POSE_SEED_NAME
+    seed = base / DETECT_SEED_NAME
     if seed.is_file():
         paths.append(seed)
     sub = base / YOLO_SUBDIR

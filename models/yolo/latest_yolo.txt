@@ -1,1 +1,1 @@
-yolo/sudoku_pose_ep50_imgsz640.pt
+yolo/sudoku_detect_ep30_imgsz640.pt

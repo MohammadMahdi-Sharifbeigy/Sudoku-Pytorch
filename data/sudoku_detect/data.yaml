@@ -1,0 +1,7 @@
+path: C:/Users/The_Death/Documents/GitHub/Sudoku-Pytorch/data/sudoku_detect
+train: train/images
+val: valid/images
+test: test/images
+nc: 1
+names:
+  0: sudoku
