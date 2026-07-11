@@ -28,7 +28,7 @@ from vision import (
 )
 import vision_a
 from train import train_epoch, validate, collect_predictions
-from data_utils import get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all
+from data_utils import get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all, get_dataloaders_mnist_only
 from report_utils import save_training_report, save_inference_report
 from optimize_model import run_optimization_and_benchmark
 
@@ -451,9 +451,14 @@ elif app_mode == "Model Training":
     data_path = st.text_input("Dataset Directory Path", value="data")
     dataset_mode = st.radio(
         "Training Dataset",
-        ["MNIST + Fonts (Recommended for printed Sudoku)", "MNIST + Hoda", "MNIST + Fonts + Hoda (All)"],
-        index=0,
-        help="Font images from data/digit_images are critical for recognizing printed/typed Sudoku digits."
+        [
+            "MNIST Only",
+            "MNIST + Fonts (Recommended for printed Sudoku)",
+            "MNIST + Hoda",
+            "MNIST + Fonts + Hoda (All)",
+        ],
+        index=1,
+        help="MNIST Only: fastest baseline. Font images from data/digit_images are critical for recognizing printed/typed Sudoku digits."
     )
 
     if st.button("Start Training Sequence", width='stretch'):
@@ -469,6 +474,8 @@ elif app_mode == "Model Training":
                 train_loader, val_loader, test_loader = get_dataloaders_all(data_path, batch_size=batch_size)
             elif dataset_mode.startswith("MNIST + Hoda"):
                 train_loader, val_loader, test_loader = get_dataloaders_mnist_hoda(data_path, batch_size=batch_size)
+            elif dataset_mode.startswith("MNIST Only"):
+                train_loader, val_loader, test_loader = get_dataloaders_mnist_only(batch_size=batch_size)
             else:
                 train_loader, val_loader, test_loader = get_dataloaders(data_path, batch_size=batch_size)
 

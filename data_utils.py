@@ -287,6 +287,24 @@ def get_dataloaders_mnist_hoda(data_path, batch_size=128):
     test_loader = DataLoader(TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False, num_workers=2)
     return train_loader, val_loader, test_loader
 
+def get_dataloaders_mnist_only(batch_size=128):
+    """Loader 4: MNIST + Empty Cells only (no Fonts, no Hoda)."""
+    x_tr_m, x_v_m, x_te_m, y_tr_m, y_v_m, y_te_m = load_mnist_images()
+    x_tr_e, x_v_e, x_te_e, y_tr_e, y_v_e, y_te_e = generate_empty_cells()
+
+    x_train = torch.cat([x_tr_m, x_tr_e], dim=0)
+    x_val   = torch.cat([x_v_m,  x_v_e],  dim=0)
+    x_test  = torch.cat([x_te_m, x_te_e], dim=0)
+
+    y_train = torch.cat([y_tr_m, y_tr_e], dim=0)
+    y_val   = torch.cat([y_v_m,  y_v_e],  dim=0)
+    y_test  = torch.cat([y_te_m, y_te_e], dim=0)
+
+    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True,  num_workers=2)
+    val_loader   = DataLoader(TensorDataset(x_val,   y_val),   batch_size=batch_size, shuffle=False, num_workers=2)
+    test_loader  = DataLoader(TensorDataset(x_test,  y_test),  batch_size=batch_size, shuffle=False, num_workers=2)
+    return train_loader, val_loader, test_loader
+
 def get_dataloaders_all(data_path, batch_size=128):
     """Loader 3: MNIST + Fonts + Hoda + Empty Cells"""
     x_tr_m, x_v_m, x_te_m, y_tr_m, y_v_m, y_te_m = load_mnist_images()
