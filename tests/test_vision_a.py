@@ -10,6 +10,7 @@ def _blank_bgr(h=500, w=500):
     return np.zeros((h, w, 3), dtype=np.uint8)
 
 
+# Shared fixtures — used by TestDetectGridCanny, TestRefineCorners, etc. below
 def _square_bgr(h=500, w=500, margin=50):
     """Black image with white rectangle — simulates a sudoku grid boundary."""
     img = np.zeros((h, w, 3), dtype=np.uint8)
@@ -43,3 +44,8 @@ class TestPreprocessClahe:
         img = _blank_bgr(300, 300)
         result = preprocess_clahe(img)
         assert result.dtype == np.uint8
+
+    def test_clahe_modifies_nontrivial_image(self):
+        img = _square_bgr()
+        result = preprocess_clahe(img)
+        assert not np.array_equal(result, img)
