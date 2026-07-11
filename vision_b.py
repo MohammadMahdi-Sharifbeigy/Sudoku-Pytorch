@@ -520,9 +520,30 @@ def _preprocess_for_hough_b(warped_bgr: np.ndarray) -> np.ndarray:
     thresh = cv2.adaptiveThreshold(
         blurred, 255,
         cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,
-        blockSize=9, C=11,
+        blockSize=9, C=18,
     )
     return cv2.bitwise_not(thresh)
+
+
+def _complete_to_ten_b(clusters: np.ndarray, size: int) -> np.ndarray:
+    """Insert missing outer borders (at 0/size) instead of duplicating last cluster."""
+    result = list(clusters)
+    cell_gap = size / 9.0
+
+    if not result or result[0] > cell_gap * 0.5:
+        result.insert(0, 0.0)
+    if len(result) < 2 or result[-1] < size - cell_gap * 0.5:
+        result.append(float(size))
+
+    result = sorted(result)[:10]
+
+    while len(result) < 10:
+        gaps = [result[i + 1] - result[i] for i in range(len(result) - 1)]
+        biggest = max(range(len(gaps)), key=lambda i: gaps[i])
+        mid = (result[biggest] + result[biggest + 1]) / 2.0
+        result.insert(biggest + 1, mid)
+
+    return np.array(result[:10], dtype=np.float32)
 
 
 def refine_corners_hough_b(warped_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
@@ -546,21 +567,19 @@ def refine_corners_hough_b(warped_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarr
         elif angle > 60:
             v_pos.append((x1 + x2) / 2.0)
 
-    if len(h_pos) < 8 or len(v_pos) < 8:
+    if len(h_pos) < 6 or len(v_pos) < 6:
         return None
 
-    h_clusters = _cluster_positions_b(h_pos, gap=15)
-    v_clusters = _cluster_positions_b(v_pos, gap=15)
+    h_clusters = _cluster_positions_b(h_pos, gap=10)
+    v_clusters = _cluster_positions_b(v_pos, gap=10)
 
-    if len(h_clusters) < 8 or len(v_clusters) < 8:
+    if len(h_clusters) < 6 or len(v_clusters) < 6:
         return None
 
-    h_ys = h_clusters[:10] if len(h_clusters) >= 10 else np.pad(
-        h_clusters, (0, 10 - len(h_clusters)), mode='edge')
-    v_xs = v_clusters[:10] if len(v_clusters) >= 10 else np.pad(
-        v_clusters, (0, 10 - len(v_clusters)), mode='edge')
+    h_ys = _complete_to_ten_b(h_clusters, h)
+    v_xs = _complete_to_ten_b(v_clusters, w)
 
-    return h_ys[:10], v_xs[:10]
+    return h_ys, v_xs
 
 
 def remove_grid_lines_hough_b(warped_bgr: np.ndarray) -> np.ndarray:
@@ -576,7 +595,7 @@ def remove_grid_lines_hough_b(warped_bgr: np.ndarray) -> np.ndarray:
     if lines is not None:
         for line in lines:
             x1, y1, x2, y2 = line[0]
-            cv2.line(result, (x1, y1), (x2, y2), 0, thickness=13)
+            cv2.line(result, (x1, y1), (x2, y2), 0, thickness=7)
     return result
 
 

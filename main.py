@@ -1,6 +1,8 @@
 import os
 import copy
+import json
 import cv2
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -29,6 +31,81 @@ from train import train_epoch, validate, collect_predictions
 from data_utils import get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all
 from report_utils import save_training_report, save_inference_report
 from optimize_model import run_optimization_and_benchmark
+
+def save_debug_outputs(
+    image_name: str,
+    img_rgb: np.ndarray,
+    cells_a, board_a, err_a,
+    cells_b, board_b, err_b,
+    cells_selected, board_selected,
+    pipeline_choice: str,
+    out_root: str = "debug_outputs",
+) -> str:
+    """Save all intermediate outputs after inference for offline inspection."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = os.path.splitext(image_name)[0]
+    out_dir = os.path.join(out_root, f"{ts}_{stem}")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # original image (BGR for cv2.imwrite)
+    cv2.imwrite(os.path.join(out_dir, "00_original.jpg"),
+                cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
+
+    def save_board(board, tag):
+        if board is None:
+            return
+        path = os.path.join(out_dir, f"{tag}_warped_grid.jpg")
+        if len(board.shape) == 3:
+            cv2.imwrite(path, cv2.cvtColor(board, cv2.COLOR_RGB2BGR))
+        else:
+            cv2.imwrite(path, board)
+
+    def save_cells_mosaic(cells, tag):
+        if cells is None:
+            return
+        fig = plot_cell_images_in_grid(cells)
+        fig.savefig(os.path.join(out_dir, f"{tag}_cells_mosaic.png"), dpi=80, bbox_inches="tight")
+        plt.close(fig)
+
+    def save_cell_images(cells, tag):
+        if cells is None:
+            return
+        cells_dir = os.path.join(out_dir, f"{tag}_cells")
+        os.makedirs(cells_dir, exist_ok=True)
+        for c in cells:
+            r, col = c['grid_row'], c['grid_col']
+            flag = "D" if c['contains_digit'] else "E"
+            cv2.imwrite(os.path.join(cells_dir, f"r{r}c{col}_{flag}.png"), c['img'])
+
+    save_board(board_a, "A")
+    save_board(board_b, "B")
+    save_board(board_selected, "selected")
+    save_cells_mosaic(cells_a, "A")
+    save_cells_mosaic(cells_b, "B")
+    save_cells_mosaic(cells_selected, "selected")
+    save_cell_images(cells_a, "A")
+    save_cell_images(cells_b, "B")
+
+    # summary JSON
+    summary = {
+        "image": image_name,
+        "pipeline_choice": pipeline_choice,
+        "pipeline_A": {
+            "success": cells_a is not None,
+            "error": err_a,
+            "digit_count": sum(c['contains_digit'] for c in cells_a) if cells_a else None,
+        },
+        "pipeline_B": {
+            "success": cells_b is not None,
+            "error": err_b,
+            "digit_count": sum(c['contains_digit'] for c in cells_b) if cells_b else None,
+        },
+    }
+    with open(os.path.join(out_dir, "summary.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+
+    return out_dir
+
 
 # --- UI Configuration ---
 st.set_page_config(
@@ -206,10 +283,14 @@ if app_mode == "Inference (Solve)":
                         options.append(f"Pipeline B (Existing+Hough) — {count_b} digits")
                     options.append("Auto (more digits wins)")
 
+                    # Default to Pipeline A (index 0) — it's cleaner than Auto
+                    default_idx = next(
+                        (i for i, o in enumerate(options) if "Pipeline A" in o), 0
+                    )
                     pipeline_choice = st.radio(
                         "Select pipeline to use for solving:",
                         options,
-                        index=len(options) - 1,
+                        index=default_idx,
                     )
 
                 # Resolve selection
@@ -222,6 +303,17 @@ if app_mode == "Inference (Solve)":
                     cells, M, board_image = cells_a, M_a, board_a
                 else:
                     cells, M, board_image = cells_b, M_b, board_b
+
+                # Save debug outputs for offline inspection
+                debug_dir = save_debug_outputs(
+                    image_name=uploaded_file.name,
+                    img_rgb=img,
+                    cells_a=cells_a, board_a=board_a, err_a=err_a,
+                    cells_b=cells_b, board_b=board_b, err_b=err_b,
+                    cells_selected=cells, board_selected=board_image,
+                    pipeline_choice=pipeline_choice,
+                )
+                st.sidebar.info(f"🔬 Debug outputs saved to `{debug_dir}`")
 
                 with st.expander("View Intermediate Processing Steps", expanded=False):
                     step_col1, step_col2, step_col3 = st.columns(3)

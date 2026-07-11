@@ -6,7 +6,7 @@ Pipeline:
   Grid detect : grayscale → Canny(50,150) → dilate → biggest 4-point contour
   Warp        : four-point perspective to 576×576 square
   Refine      : HoughLinesP → cluster into 10H + 10V lines → exact cell bounds
-  Line erase  : paint detected lines black (thickness=13)
+  Line erase  : paint detected lines black (thickness=7)
   Cell slice  : deterministic crop from Hough line positions
 """
 
@@ -92,9 +92,39 @@ def _preprocess_for_hough(warped_bgr: np.ndarray) -> np.ndarray:
     thresh = cv2.adaptiveThreshold(
         blurred, 255,
         cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY,
-        blockSize=9, C=11,
+        blockSize=9, C=18,
     )
     return cv2.bitwise_not(thresh)
+
+
+def _complete_to_ten(clusters: np.ndarray, size: int) -> np.ndarray:
+    """
+    Ensure exactly 10 grid border positions spanning [0, size].
+
+    HoughLinesP misses outer borders when they fall on the warped image edge.
+    We insert 0 / size at the appropriate end rather than duplicating with
+    mode='edge', which would silently shift all rows by one.
+    """
+    result = list(clusters)
+    cell_gap = size / 9.0
+
+    # Insert outer borders if absent (threshold: must be within half a cell of edge)
+    if not result or result[0] > cell_gap * 0.5:
+        result.insert(0, 0.0)
+    if len(result) < 2 or result[-1] < size - cell_gap * 0.5:
+        result.append(float(size))
+
+    # Trim any excess (e.g. spurious lines beyond borders)
+    result = sorted(result)[:10]
+
+    # If still short, interpolate missing inner lines
+    while len(result) < 10:
+        gaps = [result[i + 1] - result[i] for i in range(len(result) - 1)]
+        biggest = max(range(len(gaps)), key=lambda i: gaps[i])
+        mid = (result[biggest] + result[biggest + 1]) / 2.0
+        result.insert(biggest + 1, mid)
+
+    return np.array(result[:10], dtype=np.float32)
 
 
 def refine_corners_hough(warped_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
@@ -123,27 +153,24 @@ def refine_corners_hough(warped_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray
     for line in lines:
         x1, y1, x2, y2 = line[0]
         angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
-        if angle < 30:          # nearly horizontal
+        if angle < 30:
             h_positions.append((y1 + y2) / 2.0)
-        elif angle > 60:        # nearly vertical
+        elif angle > 60:
             v_positions.append((x1 + x2) / 2.0)
 
-    if len(h_positions) < 8 or len(v_positions) < 8:
+    if len(h_positions) < 6 or len(v_positions) < 6:
         return None
 
     h_clusters = _cluster_positions(h_positions, gap=10)
     v_clusters = _cluster_positions(v_positions, gap=10)
 
-    if len(h_clusters) < 8 or len(v_clusters) < 8:
+    if len(h_clusters) < 6 or len(v_clusters) < 6:
         return None
 
-    # Keep the 10 most evenly spaced; if we have exactly 10 great, else trim.
-    h_ys = h_clusters[:10] if len(h_clusters) >= 10 else np.pad(
-        h_clusters, (0, 10 - len(h_clusters)), mode='edge')
-    v_xs = v_clusters[:10] if len(v_clusters) >= 10 else np.pad(
-        v_clusters, (0, 10 - len(v_clusters)), mode='edge')
+    h_ys = _complete_to_ten(h_clusters, h)
+    v_xs = _complete_to_ten(v_clusters, w)
 
-    return h_ys[:10], v_xs[:10]
+    return h_ys, v_xs
 
 
 def remove_grid_lines_hough(warped_bgr: np.ndarray) -> np.ndarray:
@@ -152,7 +179,7 @@ def remove_grid_lines_hough(warped_bgr: np.ndarray) -> np.ndarray:
 
     Strategy: adaptive-threshold the warped image so grid lines are white,
     detect them with HoughLinesP, paint thick black over each detected line.
-    Thickness=13 covers 1-2 px lines plus antialiasing artifacts.
+    Thickness=7 erases the line while leaving digit pixels near the border intact.
     """
     h, w = warped_bgr.shape[:2]
     binary = _preprocess_for_hough(warped_bgr)
@@ -167,7 +194,7 @@ def remove_grid_lines_hough(warped_bgr: np.ndarray) -> np.ndarray:
     if lines is not None:
         for line in lines:
             x1, y1, x2, y2 = line[0]
-            cv2.line(result, (x1, y1), (x2, y2), 0, thickness=13)
+            cv2.line(result, (x1, y1), (x2, y2), 0, thickness=7)
 
     return result
 
