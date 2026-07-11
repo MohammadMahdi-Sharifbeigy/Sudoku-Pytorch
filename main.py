@@ -21,12 +21,12 @@ from solver import SudokuSolver
 from vision import (
     resize_and_maintain_aspect_ratio,
     apply_grayscale_blur_and_threshold,
+    get_valid_cells_from_image as vision_orig_get_cells,
     get_predicted_sudoku_grid_torch,
     generate_solution_image,
     plot_cell_images_in_grid,
 )
 import vision_a
-import vision_b
 from train import train_epoch, validate, collect_predictions
 from data_utils import get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all
 from report_utils import save_training_report, save_inference_report
@@ -225,33 +225,43 @@ if app_mode == "Inference (Solve)":
 
         with st.spinner('Processing image and extracting grid...'):
             try:
-                # --- Step-by-Step Vision Pipeline ---
-                # Run both pipelines
+                # --- Run both pipelines: Original vs A ---
+                cells_orig, M_orig, board_orig = None, None, None
                 cells_a, M_a, board_a = None, None, None
-                cells_b, M_b, board_b = None, None, None
-                err_a, err_b = None, None
+                err_orig, err_a = None, None
+
+                try:
+                    cells_orig, M_orig, board_orig = vision_orig_get_cells(img)
+                except Exception as e:
+                    err_orig = str(e)
 
                 try:
                     cells_a, M_a, board_a = vision_a.get_valid_cells_from_image(img)
                 except Exception as e:
                     err_a = str(e)
 
-                try:
-                    cells_b, M_b, board_b = vision_b.get_valid_cells_from_image(img)
-                except Exception as e:
-                    err_b = str(e)
-
-                if cells_a is None and cells_b is None:
+                if cells_orig is None and cells_a is None:
                     raise Exception(
-                        f"Both pipelines failed.\nA: {err_a}\nB: {err_b}"
+                        f"Both pipelines failed.\nOriginal: {err_orig}\nA: {err_a}"
                     )
 
                 # ── Pipeline comparison panel ──────────────────────────────────
-                with st.expander("Pipeline Comparison (A vs B)", expanded=True):
-                    cmp_col_a, cmp_col_b = st.columns(2)
+                with st.expander("Pipeline Comparison (Original vs A)", expanded=True):
+                    cmp_col_orig, cmp_col_a = st.columns(2)
 
+                    count_orig = sum(c['contains_digit'] for c in cells_orig) if cells_orig else -1
                     count_a = sum(c['contains_digit'] for c in cells_a) if cells_a else -1
-                    count_b = sum(c['contains_digit'] for c in cells_b) if cells_b else -1
+
+                    with cmp_col_orig:
+                        st.markdown("**Original Pipeline**")
+                        if cells_orig is None:
+                            st.error(f"Failed: {err_orig}")
+                        else:
+                            st.image(board_orig, channels="GRAY",
+                                     caption=f"Warped grid ({count_orig} digits detected)")
+                            fig_orig = plot_cell_images_in_grid(cells_orig)
+                            st.pyplot(fig_orig)
+                            plt.close(fig_orig)
 
                     with cmp_col_a:
                         st.markdown("**Pipeline A — Canny + Hough**")
@@ -264,29 +274,13 @@ if app_mode == "Inference (Solve)":
                             st.pyplot(fig_a)
                             plt.close(fig_a)
 
-                    with cmp_col_b:
-                        st.markdown("**Pipeline B — Existing + Hough**")
-                        if cells_b is None:
-                            st.error(f"Failed: {err_b}")
-                        else:
-                            st.image(board_b, channels="GRAY",
-                                     caption=f"Warped grid ({count_b} digits detected)")
-                            fig_b = plot_cell_images_in_grid(cells_b)
-                            st.pyplot(fig_b)
-                            plt.close(fig_b)
-
-                    # Pipeline selector
                     options = []
+                    if cells_orig is not None:
+                        options.append(f"Original — {count_orig} digits")
                     if cells_a is not None:
                         options.append(f"Pipeline A (Canny+Hough) — {count_a} digits")
-                    if cells_b is not None:
-                        options.append(f"Pipeline B (Existing+Hough) — {count_b} digits")
-                    options.append("Auto (more digits wins)")
 
-                    # Default to Pipeline A (index 0) — it's cleaner than Auto
-                    default_idx = next(
-                        (i for i, o in enumerate(options) if "Pipeline A" in o), 0
-                    )
+                    default_idx = 0  # default to Original (currently better)
                     pipeline_choice = st.radio(
                         "Select pipeline to use for solving:",
                         options,
@@ -294,22 +288,17 @@ if app_mode == "Inference (Solve)":
                     )
 
                 # Resolve selection
-                if "Auto" in pipeline_choice:
-                    if count_a >= count_b:
-                        cells, M, board_image = cells_a, M_a, board_a
-                    else:
-                        cells, M, board_image = cells_b, M_b, board_b
-                elif "Pipeline A" in pipeline_choice:
+                if "Pipeline A" in pipeline_choice:
                     cells, M, board_image = cells_a, M_a, board_a
                 else:
-                    cells, M, board_image = cells_b, M_b, board_b
+                    cells, M, board_image = cells_orig, M_orig, board_orig
 
                 # Save debug outputs for offline inspection
                 debug_dir = save_debug_outputs(
                     image_name=uploaded_file.name,
                     img_rgb=img,
                     cells_a=cells_a, board_a=board_a, err_a=err_a,
-                    cells_b=cells_b, board_b=board_b, err_b=err_b,
+                    cells_b=cells_orig, board_b=board_orig, err_b=err_orig,
                     cells_selected=cells, board_selected=board_image,
                     pipeline_choice=pipeline_choice,
                 )

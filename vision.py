@@ -292,6 +292,16 @@ def locate_cells_within_grid(grid_img):
             cell_img = thresh[min(y_px):max(y_px)+1, min(x_px):max(x_px)+1]
             has_digit, cell_img = check_for_digit_in_cell_image(
                 cell_img, area_threshold=4, apply_border=True)
+            if not has_digit:
+                # Digit may clip the cell border in perspective-distorted rows.
+                has_digit, cell_img = check_for_digit_in_cell_image(
+                    cell_img, area_threshold=4, apply_border=False)
+            if has_digit:
+                # Thicken digit strokes so perspective-compressed shapes (6→8, 9→8)
+                # retain their true proportions at 28×28. Applied after border
+                # clearing so grid lines are already gone.
+                _dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3 , 3))
+                cell_img = cv2.erode(cell_img, _dil_k, iterations=2)
             cell_img = center_and_resize_digit(cell_img) if has_digit else np.zeros((28, 28), dtype=np.uint8)
             moments  = cv2.moments(contour)
             if moments['m00'] == 0:
@@ -371,6 +381,9 @@ def slice_grid_into_cells(grid_img, n=9, pad_frac=0.02):
             thr = _clear_border_components(thr)
             has_digit, thr = check_for_digit_in_cell_image(
                 thr, area_threshold=4, apply_border=False)
+            if has_digit:
+                _dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+                thr = cv2.erode(thr, _dil_k, iterations=2)
             cell_img = center_and_resize_digit(thr) if has_digit \
                 else np.zeros((28, 28), dtype=np.uint8)
 
