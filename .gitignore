@@ -41,3 +41,5 @@ frontend/debug.log
 
 #graphify
 graphify-out/
+
+debug_outputs/
