@@ -19,11 +19,12 @@ from solver import SudokuSolver
 from vision import (
     resize_and_maintain_aspect_ratio,
     apply_grayscale_blur_and_threshold,
-    get_valid_cells_from_image,
     get_predicted_sudoku_grid_torch,
     generate_solution_image,
-    plot_cell_images_in_grid
+    plot_cell_images_in_grid,
 )
+import vision_a
+import vision_b
 from train import train_epoch, validate, collect_predictions
 from data_utils import get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all
 from report_utils import save_training_report, save_inference_report
@@ -148,23 +149,96 @@ if app_mode == "Inference (Solve)":
         with st.spinner('Processing image and extracting grid...'):
             try:
                 # --- Step-by-Step Vision Pipeline ---
+                # Run both pipelines
+                cells_a, M_a, board_a = None, None, None
+                cells_b, M_b, board_b = None, None, None
+                err_a, err_b = None, None
+
+                try:
+                    cells_a, M_a, board_a = vision_a.get_valid_cells_from_image(img)
+                except Exception as e:
+                    err_a = str(e)
+
+                try:
+                    cells_b, M_b, board_b = vision_b.get_valid_cells_from_image(img)
+                except Exception as e:
+                    err_b = str(e)
+
+                if cells_a is None and cells_b is None:
+                    raise Exception(
+                        f"Both pipelines failed.\nA: {err_a}\nB: {err_b}"
+                    )
+
+                # ── Pipeline comparison panel ──────────────────────────────────
+                with st.expander("Pipeline Comparison (A vs B)", expanded=True):
+                    cmp_col_a, cmp_col_b = st.columns(2)
+
+                    count_a = sum(c['contains_digit'] for c in cells_a) if cells_a else -1
+                    count_b = sum(c['contains_digit'] for c in cells_b) if cells_b else -1
+
+                    with cmp_col_a:
+                        st.markdown("**Pipeline A — Canny + Hough**")
+                        if cells_a is None:
+                            st.error(f"Failed: {err_a}")
+                        else:
+                            st.image(board_a, channels="GRAY",
+                                     caption=f"Warped grid ({count_a} digits detected)")
+                            fig_a = plot_cell_images_in_grid(cells_a)
+                            st.pyplot(fig_a)
+                            plt.close(fig_a)
+
+                    with cmp_col_b:
+                        st.markdown("**Pipeline B — Existing + Hough**")
+                        if cells_b is None:
+                            st.error(f"Failed: {err_b}")
+                        else:
+                            st.image(board_b, channels="GRAY",
+                                     caption=f"Warped grid ({count_b} digits detected)")
+                            fig_b = plot_cell_images_in_grid(cells_b)
+                            st.pyplot(fig_b)
+                            plt.close(fig_b)
+
+                    # Pipeline selector
+                    options = []
+                    if cells_a is not None:
+                        options.append(f"Pipeline A (Canny+Hough) — {count_a} digits")
+                    if cells_b is not None:
+                        options.append(f"Pipeline B (Existing+Hough) — {count_b} digits")
+                    options.append("Auto (more digits wins)")
+
+                    pipeline_choice = st.radio(
+                        "Select pipeline to use for solving:",
+                        options,
+                        index=len(options) - 1,
+                    )
+
+                # Resolve selection
+                if "Auto" in pipeline_choice:
+                    if count_a >= count_b:
+                        cells, M, board_image = cells_a, M_a, board_a
+                    else:
+                        cells, M, board_image = cells_b, M_b, board_b
+                elif "Pipeline A" in pipeline_choice:
+                    cells, M, board_image = cells_a, M_a, board_a
+                else:
+                    cells, M, board_image = cells_b, M_b, board_b
+
                 with st.expander("View Intermediate Processing Steps", expanded=False):
                     step_col1, step_col2, step_col3 = st.columns(3)
-
                     thresh = apply_grayscale_blur_and_threshold(img, blocksize=41, c=8)
                     with step_col1:
                         st.markdown("**1. Adaptive Thresholding**")
                         st.image(thresh, width='stretch', channels="GRAY")
-
-                    cells, M, board_image = get_valid_cells_from_image(img)
                     with step_col2:
-                        st.markdown("**2. Perspective Transform**")
-                        st.image(board_image, width='stretch', channels="GRAY")
-
+                        st.markdown("**2. Perspective Transform (selected)**")
+                        if board_image is not None:
+                            st.image(board_image, width='stretch', channels="GRAY")
                     with step_col3:
-                        st.markdown("**3. Cell Extraction**")
-                        fig = plot_cell_images_in_grid(cells)
-                        st.pyplot(fig)
+                        st.markdown("**3. Cell Extraction (selected)**")
+                        if cells is not None:
+                            fig = plot_cell_images_in_grid(cells)
+                            st.pyplot(fig)
+                            plt.close(fig)
 
                 # --- Per-cell Prediction Detail ---
                 per_cell = get_per_cell_predictions(model, cells, device)
