@@ -27,3 +27,7 @@ Thumbs.db
 
 #codegrapg
 .codegraph/
+
+debug_outputs/  
+
+docs/
