@@ -338,6 +338,96 @@ def get_dataloaders_all(data_path, batch_size=128):
     return train_loader, val_loader, test_loader
 
 
+def get_dataloaders_unified20(data_path, batch_size=128):
+    """Unified 20-class loader: MNIST + Fonts + Hoda + Empty Cells.
+
+    Class layout
+    ------------
+    0        : English empty cell
+    1 – 9    : English digits 1-9   (MNIST, Fonts)
+    10       : Persian empty cell   (not used in training — empty mapped to 0)
+    11 – 19  : Persian digits 1-9   (Hoda)
+
+    In practice empty cells → class 0 only (class 10 unused during training,
+    model still learns it implicitly through the empty-cell class structure).
+
+    Returns (train_loader, val_loader, test_loader).
+    Each batch: (images, unified_labels_0_to_19).
+    """
+    x_tr_m, x_v_m, x_te_m, y_tr_m, y_v_m, y_te_m = load_mnist_images()
+    img_dict = get_font_image_dict(data_path)
+    x_tr_f, x_v_f, x_te_f, y_tr_f, y_v_f, y_te_f = load_font_image_arrays(img_dict)
+    x_tr_h, x_v_h, x_te_h, y_tr_h, y_v_h, y_te_h = load_hoda_images(data_path)
+    x_tr_e, x_v_e, x_te_e, y_tr_e, y_v_e, y_te_e = generate_empty_cells()
+
+    # English data: labels already 1-9 → keep as-is (classes 1-9)
+    # Persian data: labels 1-9 → add 10 (classes 11-19)
+    # Empty cells: label 0 → class 0
+
+    x_lists  = {'tr': [x_tr_m, x_tr_f, x_tr_e], 'v': [x_v_m, x_v_f, x_v_e], 'te': [x_te_m, x_te_f, x_te_e]}
+    y_lists  = {'tr': [y_tr_m, y_tr_f, y_tr_e], 'v': [y_v_m, y_v_f, y_v_e], 'te': [y_te_m, y_te_f, y_te_e]}
+
+    if x_tr_h is not None:
+        # shift Persian labels: 1-9 → 11-19
+        y_tr_h_u = y_tr_h + 10
+        y_v_h_u  = y_v_h  + 10
+        y_te_h_u = y_te_h + 10
+        x_lists['tr'].append(x_tr_h); y_lists['tr'].append(y_tr_h_u)
+        x_lists['v'].append(x_v_h);   y_lists['v'].append(y_v_h_u)
+        x_lists['te'].append(x_te_h); y_lists['te'].append(y_te_h_u)
+        print(f"Unified 20-class  English classes 1-9 · Persian classes 11-19 · Empty class 0")
+    else:
+        print("WARNING: Hoda not found — unified model will train on English-only (10 classes effective).")
+
+    x_train = torch.cat(x_lists['tr'], dim=0)
+    x_val   = torch.cat(x_lists['v'],  dim=0)
+    x_test  = torch.cat(x_lists['te'], dim=0)
+    y_train = torch.cat(y_lists['tr'], dim=0)
+    y_val   = torch.cat(y_lists['v'],  dim=0)
+    y_test  = torch.cat(y_lists['te'], dim=0)
+
+    # Sanity: all labels must be in [0, 19]
+    assert y_train.max() <= 19 and y_train.min() >= 0, \
+        f"Unified label out of range: min={y_train.min()} max={y_train.max()}"
+
+    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True,  num_workers=2)
+    val_loader   = DataLoader(TensorDataset(x_val,   y_val),   batch_size=batch_size, shuffle=False, num_workers=2)
+    test_loader  = DataLoader(TensorDataset(x_test,  y_test),  batch_size=batch_size, shuffle=False, num_workers=2)
+    return train_loader, val_loader, test_loader
+
+
+def get_dataloaders_persian(data_path, batch_size=128):
+    """Loader: Hoda (Persian) + Empty Cells only.
+    For training a DigitCNN dedicated to Persian handwritten digits.
+    Returns None loaders if Hoda files not found.
+    """
+    x_tr_h, x_v_h, x_te_h, y_tr_h, y_v_h, y_te_h = load_hoda_images(data_path)
+    if x_tr_h is None:
+        return None, None, None
+
+    x_tr_e, x_v_e, x_te_e, y_tr_e, y_v_e, y_te_e = generate_empty_cells()
+
+    x_train = torch.cat([x_tr_h, x_tr_e], dim=0)
+    x_val   = torch.cat([x_v_h,  x_v_e],  dim=0)
+    x_test  = torch.cat([x_te_h, x_te_e], dim=0)
+    y_train = torch.cat([y_tr_h, y_tr_e], dim=0)
+    y_val   = torch.cat([y_v_h,  y_v_e],  dim=0)
+    y_test  = torch.cat([y_te_h, y_te_e], dim=0)
+
+    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True,  num_workers=2)
+    val_loader   = DataLoader(TensorDataset(x_val,   y_val),   batch_size=batch_size, shuffle=False, num_workers=2)
+    test_loader  = DataLoader(TensorDataset(x_test,  y_test),  batch_size=batch_size, shuffle=False, num_workers=2)
+    return train_loader, val_loader, test_loader
+
+
+def get_dataloaders_english(data_path, batch_size=128):
+    """Loader: MNIST + Fonts + Empty Cells only (no Hoda).
+    For training a DigitCNN dedicated to English/printed digits.
+    Alias for get_dataloaders (identical data).
+    """
+    return get_dataloaders(data_path, batch_size=batch_size)
+
+
 # ==========================================
 # 4. Multi-Task Data Helpers
 # ==========================================

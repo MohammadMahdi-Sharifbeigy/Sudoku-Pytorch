@@ -16,7 +16,9 @@ import torch.optim as optim
 from sklearn.metrics import confusion_matrix
 
 # --- Local Module Imports ---
-from model import DigitCNN, FocalLoss, MultiTaskDigitCNN, MultiTaskFocalLoss
+from model import (DigitCNN, FocalLoss,
+                   MultiTaskDigitCNN, MultiTaskFocalLoss,
+                   UnifiedDigitCNN, decode_unified_class, UNIFIED_NUM_CLASSES)
 from solver import SudokuSolver
 from vision import (
     resize_and_maintain_aspect_ratio,
@@ -30,7 +32,9 @@ import vision_a
 from train import (train_epoch, validate, collect_predictions,
                    train_epoch_multitask, validate_multitask, collect_predictions_multitask)
 from data_utils import (get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all,
-                        get_dataloaders_mnist_only, get_dataloaders_multitask)
+                        get_dataloaders_mnist_only, get_dataloaders_multitask,
+                        get_dataloaders_persian, get_dataloaders_english,
+                        get_dataloaders_unified20)
 from report_utils import save_training_report, save_inference_report, save_training_report_multitask
 from optimize_model import run_optimization_and_benchmark, run_optimization_and_benchmark_multitask
 
@@ -142,14 +146,14 @@ st.sidebar.markdown(f"**Compute Device:** `{device}`")
 # ==========================================
 # HELPER: Per-cell prediction details
 # ==========================================
-def get_per_cell_predictions(model, cells, device, is_multitask=False):
+def get_per_cell_predictions(model, cells, device, is_multitask=False, is_unified=False):
     """Returns predicted label, confidence, and optionally language per cell.
 
     model can be:
-      - DigitCNN (PyTorch)                 → single output tensor
-      - MultiTaskDigitCNN (PyTorch)        → tuple (digit_logits, lang_logits)
-      - OnnxInferenceSession (single-task) → single output tensor via __call__
-      - OnnxInferenceSession (multi-task)  → use .infer_multitask() for both heads
+      DigitCNN                    → single output tensor (10 classes)
+      MultiTaskDigitCNN           → tuple (digit_logits, lang_logits)
+      UnifiedDigitCNN             → single output tensor (20 classes)
+      OnnxInferenceSession        → __call__ returns first output; .infer_multitask() for both heads
     """
     is_onnx_mt = (isinstance(model, OnnxInferenceSession)
                   and model.n_outputs > 1
@@ -159,7 +163,7 @@ def get_per_cell_predictions(model, cells, device, is_multitask=False):
     for cell in cells:
         if not cell['contains_digit']:
             entry = {'label': 0, 'confidence': 1.0, 'has_digit': False}
-            if is_multitask:
+            if is_multitask or is_unified:
                 entry['lang_label'] = None
                 entry['lang_confidence'] = None
             results.append(entry)
@@ -169,27 +173,41 @@ def get_per_cell_predictions(model, cells, device, is_multitask=False):
         tensor = torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0).to(device)
 
         with torch.no_grad():
+            if is_unified:
+                logits20 = model(tensor)                          # (1, 20)
+                probs20  = torch.softmax(logits20, dim=1).cpu().numpy()[0]
+                cls_pred = int(np.argmax(probs20))
+                cls_conf = float(probs20[cls_pred])
+                digit, lang_name = decode_unified_class(cls_pred)
+                # confidence for reporting: prob of predicted 20-class
+                results.append({
+                    'label': digit, 'confidence': cls_conf,
+                    'has_digit': True,
+                    'lang_label':      (0 if lang_name == 'Persian' else 1) if lang_name else None,
+                    'lang_confidence': cls_conf,
+                })
+                continue
+
             if is_onnx_mt:
                 d_out, l_out = model.infer_multitask(tensor)
-                d_probs  = torch.softmax(d_out, dim=1).cpu().numpy()[0]
-                l_probs  = torch.softmax(l_out, dim=1).cpu().numpy()[0]
             elif is_multitask:
                 d_out, l_out = model(tensor)
-                d_probs  = torch.softmax(d_out, dim=1).cpu().numpy()[0]
-                l_probs  = torch.softmax(l_out, dim=1).cpu().numpy()[0]
             else:
-                output  = model(tensor)
-                d_probs = torch.softmax(output, dim=1).cpu().numpy()[0]
+                d_out = model(tensor)
 
-        pred = int(np.argmax(d_probs))
-        conf = float(d_probs[pred])
-
-        if is_multitask:
+        if is_multitask or is_onnx_mt:
+            d_probs   = torch.softmax(d_out, dim=1).cpu().numpy()[0]
+            l_probs   = torch.softmax(l_out, dim=1).cpu().numpy()[0]
+            pred      = int(np.argmax(d_probs))
+            conf      = float(d_probs[pred])
             lang_pred = int(np.argmax(l_probs))
             lang_conf = float(l_probs[lang_pred])
             results.append({'label': pred, 'confidence': conf, 'has_digit': True,
                              'lang_label': lang_pred, 'lang_confidence': lang_conf})
         else:
+            probs = torch.softmax(d_out, dim=1).cpu().numpy()[0]
+            pred  = int(np.argmax(probs))
+            conf  = float(probs[pred])
             results.append({'label': pred, 'confidence': conf, 'has_digit': True})
     return results
 
@@ -396,6 +414,28 @@ class DigitOnlyModelWrapper:
     def to(self, device): self._model.to(device); return self
 
 
+class UnifiedDigitOnlyWrapper:
+    """Wraps UnifiedDigitCNN (20-class) so vision.py gets digit logits (0-9).
+
+    Folds English + Persian logits per digit position:
+      digit_logit[0] = max(class_0, class_10)   ← empty
+      digit_logit[d] = class_d + class_{d+10}   ← digit d in either language
+    vision.py then argmaxes over 10 classes to get digit 0-9.
+    """
+    def __init__(self, model):
+        self._model = model
+
+    def __call__(self, x):
+        logits20 = self._model(x)                     # (B, 20)
+        logits10 = logits20[:, :10].clone()
+        logits10[:, 0] = torch.maximum(logits20[:, 0], logits20[:, 10])   # empty
+        logits10[:, 1:] = logits20[:, 1:10] + logits20[:, 11:20]          # sum English+Persian per digit
+        return logits10                               # (B, 10)
+
+    def eval(self): self._model.eval(); return self
+    def to(self, device): self._model.to(device); return self
+
+
 # ==========================================
 # MODE 1: INFERENCE (SOLVE SUDOKU)
 # ==========================================
@@ -409,51 +449,128 @@ if app_mode == "Inference (Solve)":
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = resize_and_maintain_aspect_ratio(input_image=img, new_width=1000)
 
-        # ── Model selection ────────────────────────────────────────────
-        mt_pt_path   = 'models/best_model_multitask.pt'
-        st_pt_path   = 'models/best_model.pt'
-        mt_onnx_path = 'models/best_model_multitask.onnx'
-        st_onnx_path = 'models/best_model.onnx'
+        # ── Model paths ───────────────────────────────────────────────
+        _paths = {
+            'persian_pt':  'models/best_model_persian.pt',
+            'english_pt':  'models/best_model_english.pt',
+            'default_pt':  'models/best_model.pt',
+            'mt_pt':       'models/best_model_multitask.pt',
+            'unified_pt':  'models/best_model_unified20.pt',
+            'persian_onnx':'models/best_model_persian.onnx',
+            'default_onnx':'models/best_model.onnx',
+            'mt_onnx':     'models/best_model_multitask.onnx',
+            'unified_onnx':'models/best_model_unified20.onnx',
+        }
 
-        is_multitask     = os.path.exists(mt_pt_path)
-        onnx_mt_avail    = os.path.exists(mt_onnx_path)
-        onnx_st_avail    = os.path.exists(st_onnx_path)
-        any_onnx_avail   = (onnx_mt_avail and is_multitask) or (onnx_st_avail and not is_multitask)
+        # ── Sidebar toggles ────────────────────────────────────────────
+        st.sidebar.markdown("### Model Selection")
 
-        use_onnx = False
-        if any_onnx_avail:
-            try:
-                import onnxruntime  # noqa: F401
-                use_onnx = st.sidebar.toggle(
-                    "Use ONNX (faster inference)",
-                    value=True,
-                    help="ONNX model runs ~2-5× faster on CPU than PyTorch for per-cell inference.",
+        use_persian = st.sidebar.toggle(
+            "Persian image (فارسی)",
+            value=False,
+            help="ON → loads best_model_persian.pt (DigitCNN trained on Hoda). "
+                 "Off → uses English model by default.",
+            disabled=not os.path.exists(_paths['persian_pt']),
+        )
+
+        available_mt_models = {}
+        if os.path.exists(_paths['mt_pt']):
+            available_mt_models["Multi-Task CNN (digit + language head)"] = 'mt'
+        if os.path.exists(_paths['unified_pt']):
+            available_mt_models["Unified 20-Class (MobileNet/ShuffleNet)"] = 'unified'
+
+        use_multimodel = st.sidebar.toggle(
+            "Auto-detect language (multi-model)",
+            value=False,
+            help="ON → predicts digit AND language per cell automatically. "
+                 "Overrides Persian toggle.",
+            disabled=len(available_mt_models) == 0,
+        )
+
+        if use_multimodel and available_mt_models:
+            selected_mt_label = st.sidebar.radio(
+                "Multi-model to use:",
+                list(available_mt_models.keys()),
+                index=0,
+            )
+            selected_mt_key = available_mt_models[selected_mt_label]
+            if selected_mt_key == 'unified':
+                unified_bb = st.sidebar.selectbox(
+                    "Backbone (must match training)",
+                    ["mobilenet_v3_small", "shufflenet_v2_x0_5"],
                 )
-            except ImportError:
-                st.sidebar.warning("onnxruntime not installed — using PyTorch. `pip install onnxruntime`")
+        else:
+            selected_mt_key = None
+            unified_bb      = "mobilenet_v3_small"
 
-        if use_onnx and any_onnx_avail:
-            onnx_path    = mt_onnx_path if is_multitask else st_onnx_path
-            model        = OnnxInferenceSession(onnx_path)
-            vision_model = model   # single output — compatible with vision.py
-            backend_label = "ONNX" + (" · multi-task" if is_multitask else "")
-            st.sidebar.success(f"Backend: {backend_label}")
+        # ── ONNX acceleration ──────────────────────────────────────────
+        use_onnx = False
+        onnx_avail = False
+        try:
+            import onnxruntime  # noqa: F401
+            if use_multimodel:
+                _onnx_candidate = _paths['mt_onnx'] if selected_mt_key == 'mt' else _paths['unified_onnx']
+            elif use_persian:
+                _onnx_candidate = _paths['persian_onnx']
+            else:
+                _onnx_candidate = _paths['default_onnx']
+            onnx_avail = os.path.exists(_onnx_candidate)
+        except ImportError:
+            st.sidebar.caption("onnxruntime not installed — ONNX unavailable.")
+            _onnx_candidate = ''
+
+        if onnx_avail:
+            use_onnx = st.sidebar.toggle("Use ONNX (faster ~2-5×)", value=True)
+
+        # ── Resolve flags ──────────────────────────────────────────────
+        is_multitask = use_multimodel and selected_mt_key == 'mt'
+        is_unified   = use_multimodel and selected_mt_key == 'unified'
+        is_persian   = use_persian and not use_multimodel
+
+        # ── Load model ─────────────────────────────────────────────────
+        if use_onnx and onnx_avail:
+            model        = OnnxInferenceSession(_onnx_candidate)
+            vision_model = model
+            _label = ("multi-task" if is_multitask else
+                      "unified-20" if is_unified else
+                      "Persian" if is_persian else "English")
+            st.sidebar.success(f"ONNX · {_label}")
+
+        elif is_unified:
+            _pt = UnifiedDigitCNN(backbone=unified_bb, pretrained=False,
+                                  num_classes=UNIFIED_NUM_CLASSES).to(device)
+            _pt.load_state_dict(torch.load(_paths['unified_pt'], map_location=device))
+            _pt.eval()
+            model        = _pt
+            vision_model = UnifiedDigitOnlyWrapper(_pt)
+            st.sidebar.info(f"PyTorch · unified-20 · {unified_bb}")
+
         elif is_multitask:
-            _pt_model = MultiTaskDigitCNN(num_digit_classes=10, num_lang_classes=2).to(device)
-            _pt_model.load_state_dict(torch.load(mt_pt_path, map_location=device))
-            _pt_model.eval()
-            model        = _pt_model        # used in get_per_cell_predictions (multi-task aware)
-            vision_model = DigitOnlyModelWrapper(_pt_model)  # used in get_predicted_sudoku_grid_torch
-            st.sidebar.info("Backend: PyTorch · multi-task")
-        elif os.path.exists(st_pt_path):
+            _pt = MultiTaskDigitCNN(num_digit_classes=10, num_lang_classes=2).to(device)
+            _pt.load_state_dict(torch.load(_paths['mt_pt'], map_location=device))
+            _pt.eval()
+            model        = _pt
+            vision_model = DigitOnlyModelWrapper(_pt)
+            st.sidebar.info("PyTorch · multi-task")
+
+        elif is_persian and os.path.exists(_paths['persian_pt']):
             model = DigitCNN(num_classes=10).to(device)
-            model.load_state_dict(torch.load(st_pt_path, map_location=device))
+            model.load_state_dict(torch.load(_paths['persian_pt'], map_location=device))
             model.eval()
             vision_model = model
-            st.sidebar.info("Backend: PyTorch · single-task")
+            st.sidebar.info("PyTorch · Persian (Hoda)")
+
         else:
-            st.error("No trained model found. Please train a model first.")
-            st.stop()
+            # Default: English single-task model
+            _eng_pt = _paths['english_pt'] if os.path.exists(_paths['english_pt']) else _paths['default_pt']
+            if not os.path.exists(_eng_pt):
+                st.error("No trained model found. Go to **Model Training** to train one.")
+                st.stop()
+            model = DigitCNN(num_classes=10).to(device)
+            model.load_state_dict(torch.load(_eng_pt, map_location=device))
+            model.eval()
+            vision_model = model
+            st.sidebar.info("PyTorch · English (default)")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -559,7 +676,11 @@ if app_mode == "Inference (Solve)":
                             plt.close(fig)
 
                 # --- Per-cell Prediction Detail ---
-                per_cell = get_per_cell_predictions(model, cells, device, is_multitask=is_multitask)
+                per_cell = get_per_cell_predictions(
+                    model, cells, device,
+                    is_multitask=is_multitask,
+                    is_unified=is_unified,
+                )
 
                 with st.expander("🔍 Cell-by-Cell Extraction & Prediction Details", expanded=True):
                     st.markdown(
@@ -700,10 +821,37 @@ elif app_mode == "Model Training":
             "MNIST + Fonts (Recommended for printed Sudoku)",
             "MNIST + Hoda",
             "MNIST + Fonts + Hoda (All)",
+            "Persian Only (Hoda — saves best_model_persian.pt)",
+            "English Only (MNIST + Fonts — saves best_model_english.pt)",
+            "Unified 20-Class (MNIST + Fonts + Hoda → saves best_model_unified20.pt)",
         ],
         index=1,
-        help="MNIST Only: fastest baseline. Font images from data/digit_images are critical for recognizing printed/typed Sudoku digits."
+        help=(
+            "Persian Only / English Only: dedicated single-language DigitCNN.\n\n"
+            "Unified 20-Class: MobileNetV3-Small or ShuffleNet V2 fine-tuned on 20 classes "
+            "(English 0-9 + Persian 0-9 in one pass). Handles mixed-language Sudoku images."
+        ),
     )
+
+    if dataset_mode.startswith("Unified"):
+        unified_backbone = st.selectbox(
+            "Backbone",
+            ["mobilenet_v3_small", "shufflenet_v2_x0_5"],
+            index=0,
+            help=(
+                "mobilenet_v3_small: ~2.5 M params, stronger features.\n"
+                "shufflenet_v2_x0_5: ~0.35 M params, fastest inference."
+            ),
+        )
+        unified_pretrained = st.toggle(
+            "Use ImageNet pretrained weights (first conv re-initialised for 1-channel input)",
+            value=False,
+            help="Pretrained weights help backbone layers but NOT the first conv (grayscale). "
+                 "False recommended for 28×28 digit images.",
+        )
+    else:
+        unified_backbone   = "mobilenet_v3_small"
+        unified_pretrained = False
 
     enable_multitask = st.toggle(
         "Enable language classification (multi-task)",
@@ -711,7 +859,8 @@ elif app_mode == "Model Training":
         help=(
             "Trains MultiTaskDigitCNN with a second head for Persian/English detection. "
             "Uses MNIST + Fonts + Hoda + Empty regardless of dataset mode above. "
-            "Class-weighted loss compensates for Hoda being the minority source."
+            "Class-weighted loss compensates for Hoda being the minority source. "
+            "Ignored when Persian Only or English Only is selected above."
         ),
     )
 
@@ -725,7 +874,210 @@ elif app_mode == "Model Training":
         try:
             os.makedirs('models', exist_ok=True)
 
-            if enable_multitask:
+            is_persian_only  = dataset_mode.startswith("Persian Only")
+            is_english_only  = dataset_mode.startswith("English Only")
+            is_unified_mode  = dataset_mode.startswith("Unified")
+            is_lang_specific = is_persian_only or is_english_only
+
+            if is_unified_mode:
+                # ======================================================
+                # UNIFIED 20-CLASS PATH
+                # ======================================================
+                train_loader, val_loader, test_loader = get_dataloaders_unified20(data_path, batch_size=batch_size)
+
+                model = UnifiedDigitCNN(
+                    backbone=unified_backbone,
+                    pretrained=unified_pretrained,
+                    num_classes=UNIFIED_NUM_CLASSES,
+                ).to(device)
+
+                total_p, _ = model.param_count()
+                st.info(f"Backbone: **{unified_backbone}** | Total params: **{total_p:,}** | "
+                        f"Pretrained: {'Yes' if unified_pretrained else 'No'}")
+
+                criterion = nn.CrossEntropyLoss()   # standard CE for 20-class
+                optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+
+                save_path     = 'models/best_model_unified20.pt'
+                progress_bar  = st.progress(0)
+                status_text   = st.empty()
+
+                chart_col1, chart_col2 = st.columns(2)
+                with chart_col1:
+                    st.markdown("#### Loss Curve")
+                    loss_ph_u = st.empty()
+                with chart_col2:
+                    st.markdown("#### Accuracy Curve (20-class)")
+                    acc_ph_u = st.empty()
+
+                metrics_table = st.empty()
+                best_val_loss = float('inf')
+                history = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': []}
+
+                for epoch in range(int(epochs)):
+                    status_text.markdown(f"**Epoch {epoch + 1}/{epochs}…**")
+                    t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)
+                    v_loss, v_acc = validate(model, val_loader, criterion, device)
+                    scheduler.step(v_loss)
+
+                    if v_loss < best_val_loss:
+                        best_val_loss = v_loss
+                        torch.save(model.state_dict(), save_path)
+
+                    history['Train Loss'].append(t_loss); history['Val Loss'].append(v_loss)
+                    history['Train Acc'].append(t_acc);   history['Val Acc'].append(v_acc)
+
+                    loss_ph_u.line_chart(pd.DataFrame({'Train': history['Train Loss'], 'Val': history['Val Loss']}))
+                    acc_ph_u.line_chart(pd.DataFrame({'Train': history['Train Acc'],  'Val': history['Val Acc']}))
+                    metrics_table.markdown(f"""
+| Metric | Training | Validation |
+|---|---|---|
+| **Loss** | {t_loss:.4f} | {v_loss:.4f} |
+| **20-class Acc** | {t_acc:.2f}% | {v_acc:.2f}% |
+                    """)
+                    progress_bar.progress((epoch + 1) / int(epochs))
+
+                status_text.success(f"Done! Saved to `{save_path}` (Best Val Loss: {best_val_loss:.4f})")
+
+                st.markdown("---"); st.markdown("### Test Set Evaluation")
+                with st.spinner("Evaluating…"):
+                    model.load_state_dict(torch.load(save_path, map_location=device))
+                    t_loss, t_acc = validate(model, test_loader, criterion, device)
+                    st.metric("20-class Test Accuracy", f"{t_acc:.2f}%",
+                              delta=f"Loss: {t_loss:.4f}", delta_color="inverse")
+
+                st.markdown("---"); st.markdown("### Confusion Matrix (20 classes)")
+                with st.spinner("Computing…"):
+                    y_true_20, y_pred_20 = collect_predictions(model, test_loader, device)
+                    all_lbl20 = sorted(set(y_true_20) | set(y_pred_20))
+                    # Label names: 0=Eng_empty, 1-9=Eng_d, 10=Per_empty, 11-19=Per_d
+                    def _cls_name(c):
+                        if c == 0:   return "ENG_0"
+                        if c < 10:   return f"ENG_{c}"
+                        if c == 10:  return "PER_0"
+                        return f"PER_{c-10}"
+                    cn20 = [_cls_name(c) for c in all_lbl20]
+                    st.pyplot(plot_confusion_matrix(y_true_20, y_pred_20, cn20))
+                    plt.close('all')
+
+                    # Digit-level accuracy (fold 20→10)
+                    digit_true = [decode_unified_class(c)[0] for c in y_true_20]
+                    digit_pred = [decode_unified_class(c)[0] for c in y_pred_20]
+                    digit_acc  = 100 * sum(t == p for t, p in zip(digit_true, digit_pred)) / max(len(digit_true), 1)
+                    st.metric("Digit Accuracy (folded to 0-9)", f"{digit_acc:.2f}%")
+
+                rpt = save_training_report(
+                    history=history, test_loss=t_loss, test_acc=t_acc,
+                    y_true=y_true_20, y_pred=y_pred_20,
+                    dataset_mode=dataset_mode + f" [{unified_backbone}]",
+                    epochs=int(epochs), learning_rate=learning_rate, batch_size=batch_size,
+                    best_val_loss=best_val_loss, model=model,
+                    output_path='models/training_report_unified20.txt',
+                )
+                st.success(f"Report saved to `{rpt}`")
+                with open(rpt, 'r', encoding='utf-8') as f:
+                    st.download_button("⬇️ Download Unified Report (.txt)",
+                                       f.read(), 'training_report_unified20.txt', 'text/plain')
+
+            elif is_lang_specific:
+                # ======================================================
+                # LANGUAGE-SPECIFIC SINGLE-TASK PATH
+                # ======================================================
+                if is_persian_only:
+                    train_loader, val_loader, test_loader = get_dataloaders_persian(data_path, batch_size=batch_size)
+                    if train_loader is None:
+                        st.error("Hoda dataset not found. Check `data/DigitDB/` exists.")
+                        st.stop()
+                    save_path  = 'models/best_model_persian.pt'
+                    lang_label = "Persian"
+                    st.info("Training dedicated Persian model (Hoda + empty cells).")
+                else:
+                    train_loader, val_loader, test_loader = get_dataloaders_english(data_path, batch_size=batch_size)
+                    save_path  = 'models/best_model_english.pt'
+                    lang_label = "English"
+                    st.info("Training dedicated English model (MNIST + Fonts + empty cells).")
+
+                model     = DigitCNN(num_classes=10).to(device)
+                criterion = FocalLoss(alpha=0.25, gamma=2.0)
+                optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+
+                progress_bar  = st.progress(0)
+                status_text   = st.empty()
+
+                chart_col1, chart_col2 = st.columns(2)
+                with chart_col1:
+                    st.markdown(f"#### Loss Curve ({lang_label})")
+                    loss_ph_lang = st.empty()
+                with chart_col2:
+                    st.markdown(f"#### Accuracy Curve ({lang_label})")
+                    acc_ph_lang = st.empty()
+
+                metrics_table = st.empty()
+                best_val_loss = float('inf')
+                history       = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': []}
+
+                for epoch in range(int(epochs)):
+                    status_text.markdown(f"**Epoch {epoch + 1}/{epochs}…**")
+                    t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)
+                    v_loss, v_acc = validate(model, val_loader, criterion, device)
+                    scheduler.step(v_loss)
+
+                    if v_loss < best_val_loss:
+                        best_val_loss = v_loss
+                        torch.save(model.state_dict(), save_path)
+
+                    history['Train Loss'].append(t_loss); history['Val Loss'].append(v_loss)
+                    history['Train Acc'].append(t_acc);   history['Val Acc'].append(v_acc)
+
+                    loss_ph_lang.line_chart(pd.DataFrame({'Train': history['Train Loss'], 'Val': history['Val Loss']}))
+                    acc_ph_lang.line_chart(pd.DataFrame({'Train': history['Train Acc'],  'Val': history['Val Acc']}))
+                    metrics_table.markdown(f"""
+| Metric | Training | Validation |
+|---|---|---|
+| **Loss** | {t_loss:.4f} | {v_loss:.4f} |
+| **Accuracy** | {t_acc:.2f}% | {v_acc:.2f}% |
+                    """)
+                    progress_bar.progress((epoch + 1) / int(epochs))
+
+                status_text.success(f"Training complete! Saved to `{save_path}` (Best Val Loss: {best_val_loss:.4f})")
+
+                st.markdown("---"); st.markdown("### Test Set Evaluation")
+                with st.spinner("Evaluating…"):
+                    model.load_state_dict(torch.load(save_path, map_location=device))
+                    t_loss, t_acc = validate(model, test_loader, criterion, device)
+                    st.metric(label=f"{lang_label} Test Accuracy", value=f"{t_acc:.2f}%",
+                              delta=f"Loss: {t_loss:.4f}", delta_color="inverse")
+
+                st.markdown("---"); st.markdown("### Confusion Matrix")
+                with st.spinner("Computing…"):
+                    y_true, y_pred = collect_predictions(model, test_loader, device)
+                    all_labels  = sorted(set(y_true) | set(y_pred))
+                    class_names = ["Empty" if l == 0 else str(l) for l in all_labels]
+                    cm_fig = plot_confusion_matrix(y_true, y_pred, class_names)
+                    st.pyplot(cm_fig); plt.close(cm_fig)
+                    cm_arr = confusion_matrix(y_true, y_pred, labels=all_labels)
+                    pca    = cm_arr.diagonal() / cm_arr.sum(axis=1).clip(min=1) * 100
+                    st.dataframe(pd.DataFrame({
+                        'Class': class_names, 'Correct': cm_arr.diagonal(),
+                        'Total': cm_arr.sum(axis=1), 'Accuracy (%)': [f"{a:.1f}" for a in pca],
+                    }).set_index('Class'), width='stretch')
+
+                rpt = save_training_report(
+                    history=history, test_loss=t_loss, test_acc=t_acc,
+                    y_true=y_true, y_pred=y_pred,
+                    dataset_mode=dataset_mode, epochs=int(epochs),
+                    learning_rate=learning_rate, batch_size=batch_size,
+                    best_val_loss=best_val_loss, model=model,
+                    output_path=f'models/training_report_{lang_label.lower()}.txt',
+                )
+                st.success(f"Report saved to `{rpt}`")
+                with open(rpt, 'r', encoding='utf-8') as f:
+                    st.download_button(f"⬇️ Download {lang_label} Report (.txt)",
+                                       f.read(), f'training_report_{lang_label.lower()}.txt', 'text/plain')
+
+            elif enable_multitask:
                 # ======================================================
                 # MULTI-TASK PATH
                 # ======================================================
@@ -751,6 +1103,20 @@ elif app_mode == "Model Training":
 
                 progress_bar  = st.progress(0)
                 status_text   = st.empty()
+
+                # Live chart placeholders (updated every epoch)
+                st.markdown("#### Live Training Curves")
+                lc1, lc2, lc3 = st.columns(3)
+                with lc1:
+                    st.markdown("**Loss**")
+                    loss_ph = st.empty()
+                with lc2:
+                    st.markdown("**Digit Accuracy (%)**")
+                    dacc_ph = st.empty()
+                with lc3:
+                    st.markdown("**Language Accuracy (%)**")
+                    lacc_ph = st.empty()
+
                 metrics_table = st.empty()
 
                 best_val_loss = float('inf')
@@ -781,6 +1147,24 @@ elif app_mode == "Model Training":
                     history['Train Digit Loss'].append(t_d_loss); history['Val Digit Loss'].append(v_d_loss)
                     history['Train Lang Loss'].append(t_l_loss);  history['Val Lang Loss'].append(v_l_loss)
 
+                    # Update live charts
+                    loss_ph.line_chart(pd.DataFrame({
+                        'Train Total': history['Train Loss'],
+                        'Val Total':   history['Val Loss'],
+                        'Train Digit': history['Train Digit Loss'],
+                        'Val Digit':   history['Val Digit Loss'],
+                        'Train Lang':  history['Train Lang Loss'],
+                        'Val Lang':    history['Val Lang Loss'],
+                    }))
+                    dacc_ph.line_chart(pd.DataFrame({
+                        'Train': history['Train Digit Acc'],
+                        'Val':   history['Val Digit Acc'],
+                    }))
+                    lacc_ph.line_chart(pd.DataFrame({
+                        'Train': history['Train Lang Acc'],
+                        'Val':   history['Val Lang Acc'],
+                    }))
+
                     metrics_table.markdown(f"""
 | Metric | Training | Validation |
 |---|---|---|
@@ -797,9 +1181,9 @@ elif app_mode == "Model Training":
                     f"(Best Val Loss: {best_val_loss:.4f})"
                 )
 
-                # ── Training dashboard ────────────────────────────────
+                # ── Final training dashboard (full 6-panel figure) ────
                 st.markdown("---")
-                st.markdown("### Training Progress Dashboard")
+                st.markdown("### Training Summary Dashboard")
                 dash_fig = plot_multitask_training_history(history)
                 st.pyplot(dash_fig)
                 plt.close(dash_fig)
