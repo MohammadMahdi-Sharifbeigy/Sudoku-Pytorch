@@ -38,3 +38,6 @@ frontend/debug.log
 
 #claude
 .claude/
+
+#graphify
+graphify-out/
