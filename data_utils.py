@@ -308,13 +308,13 @@ def get_dataloaders_mnist_only(batch_size=128):
 def get_dataloaders_all(data_path, batch_size=128):
     """Loader 3: MNIST + Fonts + Hoda + Empty Cells"""
     x_tr_m, x_v_m, x_te_m, y_tr_m, y_v_m, y_te_m = load_mnist_images()
-    
+
     img_dict = get_font_image_dict(data_path)
     x_tr_f, x_v_f, x_te_f, y_tr_f, y_v_f, y_te_f = load_font_image_arrays(img_dict)
 
     x_tr_h, x_v_h, x_te_h, y_tr_h, y_v_h, y_te_h = load_hoda_images(data_path)
     x_tr_e, x_v_e, x_te_e, y_tr_e, y_v_e, y_te_e = generate_empty_cells()
-    
+
     x_train_list, y_train_list = [x_tr_m, x_tr_f, x_tr_e], [y_tr_m, y_tr_f, y_tr_e]
     x_val_list, y_val_list = [x_v_m, x_v_f, x_v_e], [y_v_m, y_v_f, y_v_e]
     x_test_list, y_test_list = [x_te_m, x_te_f, x_te_e], [y_te_m, y_te_f, y_te_e]
@@ -323,16 +323,162 @@ def get_dataloaders_all(data_path, batch_size=128):
         x_train_list.append(x_tr_h); y_train_list.append(y_tr_h)
         x_val_list.append(x_v_h); y_val_list.append(y_v_h)
         x_test_list.append(x_te_h); y_test_list.append(y_te_h)
-    
+
     x_train = torch.cat(x_train_list, dim=0)
     x_val = torch.cat(x_val_list, dim=0)
     x_test = torch.cat(x_test_list, dim=0)
-    
+
     y_train = torch.cat(y_train_list, dim=0)
     y_val = torch.cat(y_val_list, dim=0)
     y_test = torch.cat(y_test_list, dim=0)
-    
+
     train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(TensorDataset(x_val, y_val), batch_size=batch_size, shuffle=False, num_workers=2)
     test_loader = DataLoader(TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False, num_workers=2)
     return train_loader, val_loader, test_loader
+
+
+# ==========================================
+# 4. Multi-Task Data Helpers
+# ==========================================
+
+LANG_PERSIAN        = 0
+LANG_ENGLISH        = 1
+LANG_EMPTY_SENTINEL = -1   # masked by CrossEntropyLoss(ignore_index=-1)
+
+
+def _make_lang_labels(digit_labels: torch.Tensor, lang_value: int) -> torch.Tensor:
+    """Return lang label tensor for a batch that is all one language.
+    Empty cells (digit_label == 0) always get LANG_EMPTY_SENTINEL regardless of lang_value.
+    """
+    lang = torch.full_like(digit_labels, lang_value)
+    lang[digit_labels == 0] = LANG_EMPTY_SENTINEL
+    return lang
+
+
+def _report_lang_balance(split_name: str, lang_labels: torch.Tensor) -> dict:
+    """Print and return Persian/English counts for a split.
+    Prints WARNING if majority class exceeds 60%.
+    """
+    valid      = lang_labels[lang_labels != LANG_EMPTY_SENTINEL]
+    n_persian  = int((valid == LANG_PERSIAN).sum())
+    n_english  = int((valid == LANG_ENGLISH).sum())
+    n_total    = n_persian + n_english
+    r_persian  = n_persian / max(n_total, 1) * 100
+    r_english  = n_english / max(n_total, 1) * 100
+    imbalanced = max(r_persian, r_english) > 60.0
+
+    print(f"[{split_name}] Lang balance  Persian: {n_persian} ({r_persian:.1f}%)  "
+          f"English: {n_english} ({r_english:.1f}%)")
+    if imbalanced:
+        print(f"WARNING [{split_name}]: Language imbalance >60/40 detected! "
+              f"Class-weighted loss will compensate.")
+
+    return {
+        'n_persian': n_persian, 'n_english': n_english,
+        'ratio_persian': r_persian, 'ratio_english': r_english,
+        'imbalanced': imbalanced,
+    }
+
+
+def compute_lang_class_weights(lang_labels_train: torch.Tensor) -> torch.Tensor:
+    """Inverse-frequency weights for Persian (0) and English (1).
+    Pass the result to MultiTaskFocalLoss(lang_class_weights=...).
+    """
+    valid  = lang_labels_train[lang_labels_train != LANG_EMPTY_SENTINEL]
+    counts = torch.zeros(2)
+    counts[LANG_PERSIAN] = (valid == LANG_PERSIAN).sum().float()
+    counts[LANG_ENGLISH] = (valid == LANG_ENGLISH).sum().float()
+    counts  = counts.clamp(min=1.0)
+    weights = counts.sum() / (2.0 * counts)
+    return weights
+
+
+def get_dataloaders_multitask(data_path, batch_size=128):
+    """Multi-task loader: MNIST + Fonts + Hoda + Empty Cells.
+
+    Each batch yields (image, digit_label, lang_label):
+      MNIST  → lang 1 (English)
+      Fonts  → lang 1 (English)
+      Hoda   → lang 0 (Persian)
+      Empty  → lang -1 (masked from loss)
+
+    Returns
+    -------
+    train_loader, val_loader, test_loader, balance_info, lang_class_weights
+      balance_info       : dict with 'train'/'val'/'test' balance stats (for st.warning)
+      lang_class_weights : torch.Tensor shape (2,) — pass to MultiTaskFocalLoss
+    """
+    x_tr_m, x_v_m, x_te_m, y_tr_m, y_v_m, y_te_m = load_mnist_images()
+    img_dict = get_font_image_dict(data_path)
+    x_tr_f, x_v_f, x_te_f, y_tr_f, y_v_f, y_te_f = load_font_image_arrays(img_dict)
+    x_tr_h, x_v_h, x_te_h, y_tr_h, y_v_h, y_te_h = load_hoda_images(data_path)
+    x_tr_e, x_v_e, x_te_e, y_tr_e, y_v_e, y_te_e = generate_empty_cells()
+
+    # Build lang labels per source
+    lt_tr_m = _make_lang_labels(y_tr_m, LANG_ENGLISH)
+    lt_v_m  = _make_lang_labels(y_v_m,  LANG_ENGLISH)
+    lt_te_m = _make_lang_labels(y_te_m, LANG_ENGLISH)
+
+    lt_tr_f = _make_lang_labels(y_tr_f, LANG_ENGLISH)
+    lt_v_f  = _make_lang_labels(y_v_f,  LANG_ENGLISH)
+    lt_te_f = _make_lang_labels(y_te_f, LANG_ENGLISH)
+
+    lt_tr_e = _make_lang_labels(y_tr_e, LANG_EMPTY_SENTINEL)
+    lt_v_e  = _make_lang_labels(y_v_e,  LANG_EMPTY_SENTINEL)
+    lt_te_e = _make_lang_labels(y_te_e, LANG_EMPTY_SENTINEL)
+
+    x_tr_list  = [x_tr_m, x_tr_f, x_tr_e]
+    y_tr_list  = [y_tr_m, y_tr_f, y_tr_e]
+    lt_tr_list = [lt_tr_m, lt_tr_f, lt_tr_e]
+
+    x_v_list   = [x_v_m,  x_v_f,  x_v_e]
+    y_v_list   = [y_v_m,  y_v_f,  y_v_e]
+    lt_v_list  = [lt_v_m,  lt_v_f,  lt_v_e]
+
+    x_te_list  = [x_te_m, x_te_f, x_te_e]
+    y_te_list  = [y_te_m, y_te_f, y_te_e]
+    lt_te_list = [lt_te_m, lt_te_f, lt_te_e]
+
+    if x_tr_h is not None:
+        lt_tr_h = _make_lang_labels(y_tr_h, LANG_PERSIAN)
+        lt_v_h  = _make_lang_labels(y_v_h,  LANG_PERSIAN)
+        lt_te_h = _make_lang_labels(y_te_h, LANG_PERSIAN)
+        x_tr_list.append(x_tr_h);   y_tr_list.append(y_tr_h);   lt_tr_list.append(lt_tr_h)
+        x_v_list.append(x_v_h);     y_v_list.append(y_v_h);     lt_v_list.append(lt_v_h)
+        x_te_list.append(x_te_h);   y_te_list.append(y_te_h);   lt_te_list.append(lt_te_h)
+
+    x_train  = torch.cat(x_tr_list,  dim=0)
+    y_train  = torch.cat(y_tr_list,  dim=0)
+    lt_train = torch.cat(lt_tr_list, dim=0)
+
+    x_val  = torch.cat(x_v_list,  dim=0)
+    y_val  = torch.cat(y_v_list,  dim=0)
+    lt_val = torch.cat(lt_v_list, dim=0)
+
+    x_test  = torch.cat(x_te_list,  dim=0)
+    y_test  = torch.cat(y_te_list,  dim=0)
+    lt_test = torch.cat(lt_te_list, dim=0)
+
+    balance_info = {
+        'train': _report_lang_balance('train', lt_train),
+        'val':   _report_lang_balance('val',   lt_val),
+        'test':  _report_lang_balance('test',  lt_test),
+    }
+    lang_class_weights = compute_lang_class_weights(lt_train)
+    print(f"Lang class weights  Persian: {lang_class_weights[0]:.4f}  "
+          f"English: {lang_class_weights[1]:.4f}")
+
+    train_loader = DataLoader(
+        TensorDataset(x_train, y_train, lt_train),
+        batch_size=batch_size, shuffle=True, num_workers=2,
+    )
+    val_loader = DataLoader(
+        TensorDataset(x_val, y_val, lt_val),
+        batch_size=batch_size, shuffle=False, num_workers=2,
+    )
+    test_loader = DataLoader(
+        TensorDataset(x_test, y_test, lt_test),
+        batch_size=batch_size, shuffle=False, num_workers=2,
+    )
+    return train_loader, val_loader, test_loader, balance_info, lang_class_weights

@@ -163,7 +163,166 @@ def save_training_report(
 
 
 # ──────────────────────────────────────────────
-# Inference report
+# Multi-task training report
+# ──────────────────────────────────────────────
+
+def save_training_report_multitask(
+    history,
+    test_digit_loss,
+    test_digit_acc,
+    test_lang_acc,
+    digit_true, digit_pred,
+    lang_true, lang_pred,
+    lang_balance_info,
+    dataset_mode,
+    epochs,
+    learning_rate,
+    batch_size,
+    best_val_loss,
+    model,
+    output_path="models/training_report_multitask.txt",
+):
+    """
+    Write a multi-task training report.
+
+    Parameters
+    ----------
+    history           : dict with keys 'Train Loss','Val Loss',
+                        'Train Digit Acc','Val Digit Acc','Train Lang Acc','Val Lang Acc',
+                        'Train Digit Loss','Train Lang Loss','Val Digit Loss','Val Lang Loss'
+    digit_true/pred   : list[int]  full test set digit labels (includes empty=0)
+    lang_true/pred    : list[int]  test set lang labels, non-empty cells only
+                        (0=Persian, 1=English)
+    lang_balance_info : {'train':…,'val':…,'test':…} from data_utils
+    """
+    from sklearn.metrics import classification_report, precision_recall_fscore_support
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    total_params     = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    all_digit_labels = sorted(set(digit_true) | set(digit_pred))
+    digit_cls_names  = {lbl: ("Empty" if lbl == 0 else str(lbl)) for lbl in all_digit_labels}
+
+    digit_cm = confusion_matrix(digit_true, digit_pred, labels=all_digit_labels)
+    lang_cm  = confusion_matrix(lang_true, lang_pred, labels=[0, 1])
+
+    lines = []
+
+    lines.append(_separator("="))
+    lines.append("  SUDOKU DIGIT CNN (MULTI-TASK) — TRAINING REPORT")
+    lines.append(f"  Generated : {_timestamp()}")
+    lines.append(_separator("="))
+
+    # Config
+    lines.append(_section("Training Configuration"))
+    lines.append(f"  Dataset mode   : {dataset_mode}")
+    lines.append(f"  Epochs         : {epochs}")
+    lines.append(f"  Learning rate  : {learning_rate}")
+    lines.append(f"  Batch size     : {batch_size}")
+    lines.append(f"  Total params   : {total_params:,}")
+    lines.append(f"  Trainable      : {trainable_params:,}")
+
+    # Imbalance audit — self-documenting for any future reader
+    lines.append(_section("Persian vs English Sample Counts  [imbalance audit]"))
+    for sn in ('train', 'val', 'test'):
+        b   = lang_balance_info.get(sn, {})
+        flag = "  *** IMBALANCED (>60/40) ***" if b.get('imbalanced') else ""
+        lines.append(
+            f"  {sn:<6}: Persian={b.get('n_persian',0)} ({b.get('ratio_persian',0):.1f}%)  "
+            f"English={b.get('n_english',0)} ({b.get('ratio_english',0):.1f}%){flag}"
+        )
+    lines.append("")
+    lines.append("  Mitigation: inverse-frequency class weights on lang CrossEntropyLoss.")
+
+    # Epoch history
+    lines.append(_section("Epoch History"))
+    lines.append(
+        f"{'Ep':>4}  {'TotL':>8}  {'DL':>8}  {'LL':>8}"
+        f"  {'DAcc':>7}  {'LAcc':>7}  {'VDL':>8}  {'VLL':>8}  {'VDAcc':>7}  {'VLAcc':>7}"
+    )
+    lines.append(_separator("-", 80))
+    for i in range(len(history.get("Train Loss", []))):
+        lines.append(
+            f"  {i+1:>3}  {history['Train Loss'][i]:>8.5f}"
+            f"  {history['Train Digit Loss'][i]:>8.5f}  {history['Train Lang Loss'][i]:>8.5f}"
+            f"  {history['Train Digit Acc'][i]:>6.2f}%  {history['Train Lang Acc'][i]:>6.2f}%"
+            f"  {history['Val Digit Loss'][i]:>8.5f}  {history['Val Lang Loss'][i]:>8.5f}"
+            f"  {history['Val Digit Acc'][i]:>6.2f}%  {history['Val Lang Acc'][i]:>6.2f}%"
+        )
+    lines.append(f"\n  Best validation loss : {best_val_loss:.6f}")
+
+    # Headline metrics
+    lines.append(_section("Test Set Results — Headline Metrics"))
+    lines.append(f"  Digit Accuracy   : {test_digit_acc:.4f}%")
+    lines.append(f"  Language Accuracy: {test_lang_acc:.4f}%")
+
+    # CRITICAL: digit accuracy broken down by language
+    lines.append(_section("Digit Accuracy by True Language  [CRITICAL — Hoda is minority]"))
+    lines.append("  Aggregate accuracy can mask failure on Persian digits (minority).")
+    lines.append("")
+    non_empty_dt = [dt for dt in digit_true if dt != 0]
+    non_empty_dp = [dp for dt, dp in zip(digit_true, digit_pred) if dt != 0]
+    lang_names   = {0: "Persian", 1: "English"}
+    if len(non_empty_dt) == len(lang_true):
+        for lid, lname in lang_names.items():
+            idxs = [i for i, lt in enumerate(lang_true) if lt == lid]
+            if not idxs:
+                lines.append(f"  {lname}: no samples in test set")
+                continue
+            sub_dt = [non_empty_dt[i] for i in idxs]
+            sub_dp = [non_empty_dp[i] for i in idxs]
+            n_ok   = sum(t == p for t, p in zip(sub_dt, sub_dp))
+            acc    = 100.0 * n_ok / len(sub_dt)
+            lines.append(f"  {lname:>8} digits: {acc:.2f}%  ({n_ok}/{len(sub_dt)})")
+    else:
+        lines.append(f"  WARNING: alignment mismatch — "
+                     f"non_empty_dt={len(non_empty_dt)}  lang_true={len(lang_true)}")
+
+    # Language head report
+    lines.append(_section("Language Head — Classification Report"))
+    lines.append(classification_report(
+        lang_true, lang_pred, labels=[0, 1],
+        target_names=["Persian", "English"], digits=4,
+    ))
+
+    lines.append(_section("Language Head — Confusion Matrix (rows=True, cols=Predicted)"))
+    lines.append("             Persian   English")
+    lines.append("  " + _separator("-", 26))
+    for i, nm in enumerate(["Persian", "English"]):
+        lines.append(f"  {nm:>8} | {lang_cm[i,0]:>7}   {lang_cm[i,1]:>7}")
+
+    # Digit head report
+    lines.append(_section("Digit Head — Classification Report"))
+    lines.append(classification_report(
+        digit_true, digit_pred,
+        labels=all_digit_labels,
+        target_names=[digit_cls_names[l] for l in all_digit_labels],
+        digits=4,
+    ))
+
+    lines.append(_section("Digit Head — Confusion Matrix"))
+    col_w      = 7
+    header_row = " " * 8 + "".join(f"{digit_cls_names[l]:>{col_w}}" for l in all_digit_labels)
+    lines.append(header_row)
+    lines.append("  " + _separator("-", max(0, len(header_row) - 2)))
+    for i, tl in enumerate(all_digit_labels):
+        row  = f"  {digit_cls_names[tl]:>5} |"
+        row += "".join(f"{digit_cm[i,j]:>{col_w}}" for j in range(len(all_digit_labels)))
+        lines.append(row)
+
+    lines.append("\n" + _separator("="))
+    lines.append("  END OF REPORT")
+    lines.append(_separator("=") + "\n")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return output_path
+
+
+# ──────────────────────────────────────────────
+# Extended inference report (lang-aware)
 # ──────────────────────────────────────────────
 
 def save_inference_report(
@@ -174,58 +333,66 @@ def save_inference_report(
     solved_board,
     output_path="models/inference_report.txt",
 ):
-    """
-    Write a per-cell extraction + prediction report to *output_path*.
-
-    Parameters
-    ----------
-    image_name     : str – filename / label for the uploaded image
-    cells          : list[dict] – sorted cell dicts from vision pipeline
-    per_cell_info  : list[dict] – {'label', 'confidence', 'has_digit'} per cell
-    grid_array     : np.ndarray shape (9,9) – raw predicted grid
-    solved_board   : np.ndarray shape (9,9) or None – solved grid, None if unsolvable
-    output_path    : str
+    """Write a per-cell extraction + prediction report.
+    per_cell_info items: {'label','confidence','has_digit'} plus optional
+    'lang_label' (0=Persian,1=English) and 'lang_confidence' when a
+    multi-task model was used.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
+    has_lang = any('lang_label' in info for info in per_cell_info)
+    lang_map  = {0: "Persian", 1: "English"}
+
     lines = []
 
-    # ── Header ──────────────────────────────────
     lines.append(_separator("="))
-    lines.append("  SUDOKU DIGIT CNN – INFERENCE REPORT")
+    lines.append("  SUDOKU DIGIT CNN — INFERENCE REPORT")
     lines.append(f"  Generated  : {_timestamp()}")
     lines.append(f"  Image      : {image_name}")
     lines.append(_separator("="))
 
-    # ── Cell-by-cell table ───────────────────────
     lines.append(_section("Cell-by-Cell Extraction & Prediction"))
-    lines.append(
-        f"  {'Cell':>5}  {'Row':>4}  {'Col':>4}  {'Has Digit':>10}"
-        f"  {'Predicted':>9}  {'Confidence':>11}  {'Shape (HxW)':>12}"
-    )
-    lines.append("  " + _separator("-", 66))
+    if has_lang:
+        lines.append(
+            f"  {'Cell':>5}  {'Row':>4}  {'Col':>4}  {'Has Digit':>10}"
+            f"  {'Predicted':>9}  {'Confidence':>11}  {'Language':>9}  {'LangConf':>9}  {'Shape':>8}"
+        )
+        lines.append("  " + _separator("-", 78))
+    else:
+        lines.append(
+            f"  {'Cell':>5}  {'Row':>4}  {'Col':>4}  {'Has Digit':>10}"
+            f"  {'Predicted':>9}  {'Confidence':>11}  {'Shape (HxW)':>12}"
+        )
+        lines.append("  " + _separator("-", 66))
 
     for idx, (cell, info) in enumerate(zip(cells, per_cell_info)):
         row = idx // 9
         col = idx % 9
-        h, w = cell['img'].shape[:2]
+        h, w      = cell['img'].shape[:2]
         has_digit = "Yes" if info['has_digit'] else "No"
-        pred = str(info['label']) if info['has_digit'] else "–"
-        conf = f"{info['confidence']*100:.1f}%" if info['has_digit'] else "–"
-        lines.append(
-            f"  {idx+1:>5}  {row:>4}  {col:>4}  {has_digit:>10}"
-            f"  {pred:>9}  {conf:>11}  {h}x{w}"
-        )
+        pred      = str(info['label']) if info['has_digit'] else "–"
+        conf      = f"{info['confidence']*100:.1f}%" if info['has_digit'] else "–"
 
-        # Blank row between Sudoku box rows (every 3rd row)
+        if has_lang:
+            ll   = info.get('lang_label')
+            lc   = info.get('lang_confidence')
+            lnam = lang_map.get(ll, "–") if ll is not None else "–"
+            lcon = f"{lc*100:.1f}%" if lc is not None else "–"
+            lines.append(
+                f"  {idx+1:>5}  {row:>4}  {col:>4}  {has_digit:>10}"
+                f"  {pred:>9}  {conf:>11}  {lnam:>9}  {lcon:>9}  {h}x{w}"
+            )
+        else:
+            lines.append(
+                f"  {idx+1:>5}  {row:>4}  {col:>4}  {has_digit:>10}"
+                f"  {pred:>9}  {conf:>11}  {h}x{w}"
+            )
         if col == 8 and row in (2, 5):
             lines.append("")
 
-    # ── Raw predicted grid ───────────────────────
     lines.append(_section("Raw Predicted Grid (0 = empty)"))
     lines.append(_format_grid(grid_array))
 
-    # ── Solved grid ──────────────────────────────
     if solved_board is not None:
         lines.append(_section("Solved Grid"))
         lines.append(_format_grid(solved_board))
@@ -234,16 +401,15 @@ def save_inference_report(
         lines.append("  *** Grid could not be solved. ***")
         lines.append("  Check the raw predicted grid above for misread digits.")
 
-    # ── Summary statistics ───────────────────────
-    n_digits  = sum(1 for i in per_cell_info if i['has_digit'])
-    n_empty   = 81 - n_digits
+    n_digits = sum(1 for i in per_cell_info if i['has_digit'])
+    n_empty  = 81 - n_digits
     if n_digits > 0:
-        confs = [i['confidence'] for i in per_cell_info if i['has_digit']]
-        avg_conf = np.mean(confs) * 100
-        min_conf = np.min(confs) * 100
-        low_conf_cells = [(idx, per_cell_info[idx]) for idx in range(81)
-                          if per_cell_info[idx]['has_digit']
-                          and per_cell_info[idx]['confidence'] < 0.50]
+        confs         = [i['confidence'] for i in per_cell_info if i['has_digit']]
+        avg_conf      = np.mean(confs) * 100
+        min_conf      = np.min(confs) * 100
+        low_conf_cells = [(i, per_cell_info[i]) for i in range(81)
+                          if per_cell_info[i]['has_digit']
+                          and per_cell_info[i]['confidence'] < 0.50]
     else:
         avg_conf = min_conf = 0.0
         low_conf_cells = []
@@ -265,14 +431,12 @@ def save_inference_report(
                     f"  predicted={info['label']}  conf={info['confidence']*100:.1f}%"
                 )
 
-    # ── Footer ───────────────────────────────────
     lines.append("\n" + _separator("="))
     lines.append("  END OF REPORT")
     lines.append(_separator("=") + "\n")
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-
     return output_path
 
 
