@@ -3,7 +3,7 @@ import numpy as np
 import cv2
 import sys
 sys.path.insert(0, '.')
-from vision_a import preprocess_clahe
+from vision_a import preprocess_clahe, detect_grid_canny
 
 
 def _blank_bgr(h=500, w=500):
@@ -49,3 +49,25 @@ class TestPreprocessClahe:
         img = _square_bgr()
         result = preprocess_clahe(img)
         assert not np.array_equal(result, img)
+
+
+class TestDetectGridCanny:
+    def test_blank_image_returns_none(self):
+        img = _blank_bgr()
+        assert detect_grid_canny(img) is None
+
+    def test_square_returns_four_corners(self):
+        img = _square_bgr()
+        pts = detect_grid_canny(img)
+        assert pts is not None, "Should detect 4 corners of the white square"
+        assert pts.shape == (4, 2)
+
+    def test_corners_ordered_tl_tr_br_bl(self):
+        img = _square_bgr(h=500, w=500, margin=50)
+        pts = detect_grid_canny(img)
+        assert pts is not None
+        tl, tr, br, bl = pts
+        assert tl[0] < tr[0], "TL x < TR x"
+        assert bl[0] < br[0], "BL x < BR x"
+        assert tl[1] < bl[1], "TL y < BL y"
+        assert tr[1] < br[1], "TR y < BR y"

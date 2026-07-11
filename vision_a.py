@@ -39,3 +39,32 @@ def preprocess_clahe(img: np.ndarray) -> np.ndarray:
     lab = cv2.merge([l, a, b])
     bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
     return cv2.GaussianBlur(bgr, (7, 7), 1)
+
+
+def detect_grid_canny(preprocessed: np.ndarray) -> np.ndarray | None:
+    """
+    BGR → float32 (4,2) corner array [TL,TR,BR,BL] or None.
+
+    Uses Canny edge detection — more stable than adaptive threshold at steep angles
+    because Canny responds to intensity gradients, not local mean.
+    """
+    gray = cv2.cvtColor(preprocessed, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, threshold1=50, threshold2=150)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    edges = cv2.dilate(edges, kernel, iterations=1)
+
+    contours = imutils.grab_contours(
+        cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    )
+    contours = [c for c in contours if cv2.contourArea(c) > 1000]
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+    perimeter = cv2.arcLength(largest, True)
+    approx = cv2.approxPolyDP(largest, 0.02 * perimeter, True)
+    if len(approx) != 4:
+        return None
+
+    pts = np.squeeze(approx, axis=1).astype(np.float32)
+    return get_quadrilateral_points_in_order(pts)
