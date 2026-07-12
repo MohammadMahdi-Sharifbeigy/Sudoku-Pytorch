@@ -1,9 +1,11 @@
 import os
 import glob
+import random
 import cv2
 import struct
 import numpy as np
 import torch
+from PIL import Image
 from torchvision import datasets, transforms
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, TensorDataset, DataLoader
@@ -14,26 +16,115 @@ from torch.utils.data import Dataset, TensorDataset, DataLoader
 MNIST_MEAN = 0.1307
 MNIST_STD  = 0.3081
 
-# Training augmentation pipeline for 28×28 grayscale tensors [1,H,W] in [0,1].
-# ToPILImage → spatial augmentations → ToTensor → Normalize → RandomErasing
-TRAIN_TRANSFORM = transforms.Compose([
-    transforms.ToPILImage(),
-    transforms.RandomAffine(
-        degrees=8,
-        translate=(0.08, 0.08),
-        scale=(0.88, 1.12),
-        shear=6,
-    ),
-    transforms.RandomPerspective(distortion_scale=0.18, p=0.35),
-    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5)),
-    transforms.RandomAdjustSharpness(sharpness_factor=2.0, p=0.3),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[MNIST_MEAN], std=[MNIST_STD]),
-    transforms.RandomErasing(p=0.25, scale=(0.02, 0.12), ratio=(0.3, 3.3), value=0),
-])
-
 # Evaluation transform: normalise only, no augmentation.
 EVAL_TRANSFORM = transforms.Normalize(mean=[MNIST_MEAN], std=[MNIST_STD])
+
+
+class RandomShadow:
+    """Simulate a shadow across part of the digit cell.
+
+    Darkens a random vertical strip (left or right half) by multiplying
+    pixel values by a factor in [intensity_low, intensity_high].
+    Applied on a PIL grayscale image before ToTensor.
+
+    Rationale: real Sudoku photos often have diagonal shadows from book binding
+    or uneven phone lighting. Even at 28×28 this helps generalise.
+    """
+
+    def __init__(self, intensity_range: tuple = (0.35, 0.70), p: float = 0.25):
+        self.intensity_range = intensity_range
+        self.p               = p
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.p:
+            return img
+        arr       = np.array(img, dtype=np.float32)
+        h, w      = arr.shape[0], arr.shape[1]
+        intensity = random.uniform(*self.intensity_range)
+
+        # Randomly choose direction: vertical strip or horizontal strip
+        if random.random() < 0.5:
+            x1 = random.randint(0, w // 2)
+            x2 = random.randint(w // 2, w)
+            arr[:, x1:x2] *= intensity
+        else:
+            y1 = random.randint(0, h // 2)
+            y2 = random.randint(h // 2, h)
+            arr[y1:y2, :] *= intensity
+
+        return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
+
+
+# Default augmentation config
+DEFAULT_AUG_CONFIG = {
+    "brightness":   0.0,   # 0 = off; >0 applies ColorJitter brightness
+    "contrast":     0.0,   # 0 = off
+    "shadow_p":     0.0,   # 0 = off; shadow probability
+    "shadow_intensity_min": 0.35,
+    "shadow_intensity_max": 0.70,
+}
+
+
+def build_train_transform(
+    brightness:           float = 0.0,
+    contrast:             float = 0.0,
+    shadow_p:             float = 0.0,
+    shadow_intensity_min: float = 0.35,
+    shadow_intensity_max: float = 0.70,
+) -> transforms.Compose:
+    """Build the full training augmentation pipeline.
+
+    All params default to 0 / off so the function degrades gracefully.
+
+    Args:
+        brightness: ColorJitter brightness factor (0 = disabled).
+        contrast:   ColorJitter contrast factor   (0 = disabled).
+        shadow_p:   Probability of applying RandomShadow (0 = disabled).
+        shadow_intensity_min/max: Shadow darkness range (0=black, 1=no change).
+    """
+    steps = [transforms.ToPILImage()]
+
+    # ── Brightness / contrast (applied on PIL before geometric ops) ──
+    jitter_kwargs = {}
+    if brightness > 0:
+        jitter_kwargs["brightness"] = brightness
+    if contrast > 0:
+        jitter_kwargs["contrast"] = contrast
+    if jitter_kwargs:
+        steps.append(transforms.ColorJitter(**jitter_kwargs))
+
+    # ── Shadow ──────────────────────────────────────────────────────
+    if shadow_p > 0:
+        steps.append(RandomShadow(
+            intensity_range=(shadow_intensity_min, shadow_intensity_max),
+            p=shadow_p,
+        ))
+
+    # ── Geometric augmentations ──────────────────────────────────────
+    steps += [
+        transforms.RandomAffine(
+            degrees=8,
+            translate=(0.08, 0.08),
+            scale=(0.88, 1.12),
+            shear=6,
+        ),
+        transforms.RandomPerspective(distortion_scale=0.18, p=0.35),
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5)),
+        transforms.RandomAdjustSharpness(sharpness_factor=2.0, p=0.3),
+    ]
+
+    # ── Tensor + normalise + pixel erasing ──────────────────────────
+    steps += [
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[MNIST_MEAN], std=[MNIST_STD]),
+        transforms.RandomErasing(p=0.25, scale=(0.02, 0.12), ratio=(0.3, 3.3), value=0),
+    ]
+
+    return transforms.Compose(steps)
+
+
+# Module-level default transform (no brightness/shadow) — kept for backward compat.
+TRAIN_TRANSFORM = build_train_transform()
 
 
 class AugmentedDataset(Dataset):
@@ -85,9 +176,16 @@ def _make_loader(ds: Dataset, batch_size: int, shuffle: bool) -> DataLoader:
 
 
 def _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test,
-                  batch_size: int) -> tuple:
-    """Wrap three splits into DataLoaders with augmentation on the train split."""
-    train_ds = AugmentedDataset(x_train, y_train, transform=TRAIN_TRANSFORM)
+                  batch_size: int,
+                  train_transform=None) -> tuple:
+    """Wrap three splits into DataLoaders with augmentation on the train split.
+
+    train_transform defaults to TRAIN_TRANSFORM when None.
+    Pass build_train_transform(...) from the UI to customise augmentation.
+    """
+    if train_transform is None:
+        train_transform = TRAIN_TRANSFORM
+    train_ds = AugmentedDataset(x_train, y_train, transform=train_transform)
     val_ds   = AugmentedDataset(x_val,   y_val,   transform=EVAL_TRANSFORM)
     test_ds  = AugmentedDataset(x_test,  y_test,  transform=EVAL_TRANSFORM)
     return (
@@ -325,7 +423,7 @@ def load_font_image_arrays(image_dict):
 # 3. DataLoader Generators
 # ==========================================
 
-def get_dataloaders(data_path, batch_size=128):
+def get_dataloaders(data_path, batch_size=128, train_transform=None):
     """Loader 1: MNIST + Fonts + Empty Cells"""
     x_tr_m, x_v_m, x_te_m, y_tr_m, y_v_m, y_te_m = load_mnist_images()
     
@@ -342,9 +440,9 @@ def get_dataloaders(data_path, batch_size=128):
     y_val = torch.cat([y_v_f, y_v_m, y_v_e], dim=0)
     y_test = torch.cat([y_te_f, y_te_m, y_te_e], dim=0)
     
-    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size, train_transform=train_transform)
 
-def get_dataloaders_mnist_hoda(data_path, batch_size=128):
+def get_dataloaders_mnist_hoda(data_path, batch_size=128, train_transform=None):
     """Loader 2: MNIST + Hoda + Empty Cells"""
     x_tr_m, x_v_m, x_te_m, y_tr_m, y_v_m, y_te_m = load_mnist_images()
     x_tr_h, x_v_h, x_te_h, y_tr_h, y_v_h, y_te_h = load_hoda_images(data_path)
@@ -367,9 +465,9 @@ def get_dataloaders_mnist_hoda(data_path, batch_size=128):
     y_val = torch.cat(y_val_list, dim=0)
     y_test = torch.cat(y_test_list, dim=0)
     
-    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size, train_transform=train_transform)
 
-def get_dataloaders_mnist_only(batch_size=128):
+def get_dataloaders_mnist_only(batch_size=128, train_transform=None):
     """Loader 4: MNIST + Empty Cells only (no Fonts, no Hoda)."""
     x_tr_m, x_v_m, x_te_m, y_tr_m, y_v_m, y_te_m = load_mnist_images()
     x_tr_e, x_v_e, x_te_e, y_tr_e, y_v_e, y_te_e = generate_empty_cells()
@@ -382,9 +480,9 @@ def get_dataloaders_mnist_only(batch_size=128):
     y_val   = torch.cat([y_v_m,  y_v_e],  dim=0)
     y_test  = torch.cat([y_te_m, y_te_e], dim=0)
 
-    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size, train_transform=train_transform)
 
-def get_dataloaders_all(data_path, batch_size=128):
+def get_dataloaders_all(data_path, batch_size=128, train_transform=None):
     """Loader 3: MNIST + Fonts + Hoda + Empty Cells"""
     x_tr_m, x_v_m, x_te_m, y_tr_m, y_v_m, y_te_m = load_mnist_images()
 
@@ -411,10 +509,10 @@ def get_dataloaders_all(data_path, batch_size=128):
     y_val = torch.cat(y_val_list, dim=0)
     y_test = torch.cat(y_test_list, dim=0)
 
-    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size, train_transform=train_transform)
 
 
-def get_dataloaders_unified20(data_path, batch_size=128):
+def get_dataloaders_unified20(data_path, batch_size=128, train_transform=None):
     """Unified 20-class loader: MNIST + Fonts + Hoda + Empty Cells.
 
     Class layout
@@ -466,10 +564,10 @@ def get_dataloaders_unified20(data_path, batch_size=128):
     assert y_train.max() <= 19 and y_train.min() >= 0, \
         f"Unified label out of range: min={y_train.min()} max={y_train.max()}"
 
-    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size, train_transform=train_transform)
 
 
-def get_dataloaders_persian(data_path, batch_size=128):
+def get_dataloaders_persian(data_path, batch_size=128, train_transform=None):
     """Loader: Hoda (Persian) + Empty Cells only.
     For training a DigitCNN dedicated to Persian handwritten digits.
     Returns None loaders if Hoda files not found.
@@ -487,15 +585,15 @@ def get_dataloaders_persian(data_path, batch_size=128):
     y_val   = torch.cat([y_v_h,  y_v_e],  dim=0)
     y_test  = torch.cat([y_te_h, y_te_e], dim=0)
 
-    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size, train_transform=train_transform)
 
 
-def get_dataloaders_english(data_path, batch_size=128):
+def get_dataloaders_english(data_path, batch_size=128, train_transform=None):
     """Loader: MNIST + Fonts + Empty Cells only (no Hoda).
     For training a DigitCNN dedicated to English/printed digits.
     Alias for get_dataloaders (identical data).
     """
-    return get_dataloaders(data_path, batch_size=batch_size)
+    return get_dataloaders(data_path, batch_size=batch_size, train_transform=train_transform)
 
 
 # ==========================================
@@ -554,7 +652,7 @@ def compute_lang_class_weights(lang_labels_train: torch.Tensor) -> torch.Tensor:
     return weights
 
 
-def get_dataloaders_multitask(data_path, batch_size=128):
+def get_dataloaders_multitask(data_path, batch_size=128, train_transform=None):
     """Multi-task loader: MNIST + Fonts + Hoda + Empty Cells.
 
     Each batch yields (image, digit_label, lang_label):
