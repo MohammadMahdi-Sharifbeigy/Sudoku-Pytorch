@@ -1,5 +1,6 @@
 """Mode 2 — Model Training Dashboard."""
 import os
+import time as _time
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -27,7 +28,10 @@ from src.train import (
 from src.report_utils import save_training_report, save_training_report_multitask
 from app.cancel import RunCancelled, clear_cancel, raise_if_cancelled, render_stop_button
 from app.plot_utils import (
-    plot_confusion_matrix, plot_lang_confusion_matrix, plot_multitask_training_history,
+    plot_confusion_matrix, plot_lang_confusion_matrix,
+    plot_multitask_training_history, plot_singletask_summary,
+    plot_lr_history, plot_time_per_epoch,
+    make_run_dir, save_fig, save_run_metadata,
 )
 
 
@@ -205,15 +209,20 @@ def _run_unified(device, data_path, batch_size, epochs, lr, backbone, pretrained
         st.markdown("#### 20-Class Accuracy"); acc_ph = st.empty()
     metrics_tbl  = st.empty()
     best_val_loss = float('inf')
-    history = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': []}
+    history       = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': []}
+    lr_history    = []
+    time_history  = []
 
     for epoch in range(int(epochs)):
         status_text.markdown(f"**Epoch {epoch + 1}/{epochs}…**")
         raise_if_cancelled("training")
+        lr_history.append(optimizer.param_groups[0]['lr'])
+        t0 = _time.time()
         t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device,
                                      should_stop=lambda: raise_if_cancelled("training"))
         v_loss, v_acc = validate(model, val_loader, criterion, device,
                                   should_stop=lambda: raise_if_cancelled("training"))
+        time_history.append(_time.time() - t0)
         _scheduler_step(scheduler, v_loss, lr_schedule)
         if v_loss < best_val_loss:
             best_val_loss = v_loss
@@ -225,7 +234,9 @@ def _run_unified(device, data_path, batch_size, epochs, lr, backbone, pretrained
         metrics_tbl.markdown(
             f"| Metric | Train | Val |\n|---|---|---|\n"
             f"| **Loss** | {t_loss:.4f} | {v_loss:.4f} |\n"
-            f"| **20-class Acc** | {t_acc:.2f}% | {v_acc:.2f}% |"
+            f"| **20-class Acc** | {t_acc:.2f}% | {v_acc:.2f}% |  \n"
+            f"| **LR** | {lr_history[-1]:.2e} | — |  \n"
+            f"| **Epoch time** | {time_history[-1]:.1f}s | — |"
         )
         progress_bar.progress((epoch + 1) / int(epochs))
 
@@ -249,7 +260,8 @@ def _run_unified(device, data_path, batch_size, epochs, lr, backbone, pretrained
             if c == 10:  return "PER_0"
             return f"PER_{c - 10}"
         cn = [_name(c) for c in all_lbl]
-        st.pyplot(plot_confusion_matrix(y_true20, y_pred20, cn)); plt.close('all')
+        cm_fig = plot_confusion_matrix(y_true20, y_pred20, cn)
+        st.pyplot(cm_fig); plt.close('all')
         digit_true = [decode_unified_class(c)[0] for c in y_true20]
         digit_pred = [decode_unified_class(c)[0] for c in y_pred20]
         d_acc = 100 * sum(t == p for t, p in zip(digit_true, digit_pred)) / max(len(digit_true), 1)
@@ -267,6 +279,22 @@ def _run_unified(device, data_path, batch_size, epochs, lr, backbone, pretrained
     with open(rpt, 'r', encoding='utf-8') as f:
         st.download_button("Download Unified Report (.txt)",
                            f.read(), 'training_report_unified20.txt', 'text/plain')
+
+    # ── Save all plots ────────────────────────────────────────────────
+    run_dir = make_run_dir(f"Unified20_{backbone}", int(epochs), batch_size, lr, weight_decay)
+    save_fig(plot_singletask_summary(history, lr_history, time_history), run_dir, "01_summary.png")
+    save_fig(plot_lr_history(lr_history),    run_dir, "02_lr_schedule.png")
+    save_fig(plot_time_per_epoch(time_history), run_dir, "03_time_per_epoch.png")
+    save_fig(cm_fig if plt.fignum_exists(cm_fig.number) else plot_confusion_matrix(y_true20, y_pred20, cn),
+             run_dir, "04_confusion_matrix.png")
+    save_run_metadata(run_dir, {
+        "model": f"Unified20_{backbone}", "epochs": int(epochs),
+        "batch_size": batch_size, "lr": lr, "weight_decay": weight_decay,
+        "lr_schedule": lr_schedule, "best_val_loss": best_val_loss,
+        "test_acc": t_acc, "total_time_s": sum(time_history),
+    })
+    st.success(f"All plots saved to `{run_dir}/`")
+    st.sidebar.success(f"Plots → `{run_dir}/`")
 
 
 def _run_lang_specific(device, data_path, batch_size, epochs, lr, dataset_mode, is_persian_only,
@@ -298,15 +326,20 @@ def _run_lang_specific(device, data_path, batch_size, epochs, lr, dataset_mode, 
         st.markdown(f"#### Accuracy Curve ({lang_label})"); acc_ph = st.empty()
 
     best_val_loss = float('inf')
-    history = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': []}
+    history      = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': []}
+    lr_history   = []
+    time_history = []
 
     for epoch in range(int(epochs)):
         status_text.markdown(f"**Epoch {epoch + 1}/{epochs}…**")
         raise_if_cancelled("training")
+        lr_history.append(optimizer.param_groups[0]['lr'])
+        t0 = _time.time()
         t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device,
                                      should_stop=lambda: raise_if_cancelled("training"))
         v_loss, v_acc = validate(model, val_loader, criterion, device,
                                   should_stop=lambda: raise_if_cancelled("training"))
+        time_history.append(_time.time() - t0)
         _scheduler_step(scheduler, v_loss, lr_schedule)
         if v_loss < best_val_loss:
             best_val_loss = v_loss
@@ -318,7 +351,9 @@ def _run_lang_specific(device, data_path, batch_size, epochs, lr, dataset_mode, 
         metrics_tbl.markdown(
             f"| Metric | Train | Val |\n|---|---|---|\n"
             f"| **Loss** | {t_loss:.4f} | {v_loss:.4f} |\n"
-            f"| **Accuracy** | {t_acc:.2f}% | {v_acc:.2f}% |"
+            f"| **Accuracy** | {t_acc:.2f}% | {v_acc:.2f}% |  \n"
+            f"| **LR** | {lr_history[-1]:.2e} | — |  \n"
+            f"| **Epoch time** | {time_history[-1]:.1f}s | — |"
         )
         progress_bar.progress((epoch + 1) / int(epochs))
 
@@ -337,7 +372,8 @@ def _run_lang_specific(device, data_path, batch_size, epochs, lr, dataset_mode, 
                                               should_stop=lambda: raise_if_cancelled("training"))
         all_lbl     = sorted(set(y_true) | set(y_pred))
         class_names = ["Empty" if l == 0 else str(l) for l in all_lbl]
-        st.pyplot(plot_confusion_matrix(y_true, y_pred, class_names)); plt.close('all')
+        cm_fig = plot_confusion_matrix(y_true, y_pred, class_names)
+        st.pyplot(cm_fig); plt.close('all')
         cm_arr = confusion_matrix(y_true, y_pred, labels=all_lbl)
         pca    = cm_arr.diagonal() / cm_arr.sum(axis=1).clip(min=1) * 100
         st.dataframe(pd.DataFrame({
@@ -356,6 +392,21 @@ def _run_lang_specific(device, data_path, batch_size, epochs, lr, dataset_mode, 
     with open(rpt, 'r', encoding='utf-8') as f:
         st.download_button(f"Download {lang_label} Report (.txt)",
                            f.read(), f'training_report_{lang_label.lower()}.txt', 'text/plain')
+
+    # ── Save all plots ────────────────────────────────────────────────
+    run_dir = make_run_dir(f"DigitCNN_{lang_label}", int(epochs), batch_size, lr, weight_decay)
+    save_fig(plot_singletask_summary(history, lr_history, time_history), run_dir, "01_summary.png")
+    save_fig(plot_lr_history(lr_history),       run_dir, "02_lr_schedule.png")
+    save_fig(plot_time_per_epoch(time_history),  run_dir, "03_time_per_epoch.png")
+    save_fig(cm_fig, run_dir, "04_confusion_matrix.png")
+    save_run_metadata(run_dir, {
+        "model": f"DigitCNN_{lang_label}", "epochs": int(epochs),
+        "batch_size": batch_size, "lr": lr, "weight_decay": weight_decay,
+        "lr_schedule": lr_schedule, "best_val_loss": best_val_loss,
+        "test_acc": t_acc, "total_time_s": sum(time_history),
+    })
+    st.success(f"All plots saved to `{run_dir}/`")
+    st.sidebar.success(f"Plots → `{run_dir}/`")
 
 
 def _run_multitask(device, data_path, batch_size, epochs, lr,
@@ -398,16 +449,21 @@ def _run_multitask(device, data_path, batch_size, epochs, lr,
         'Train Digit Loss': [], 'Train Lang Loss': [],
         'Val Digit Loss':   [], 'Val Lang Loss':   [],
     }
+    lr_history   = []
+    time_history = []
 
     for epoch in range(int(epochs)):
         status_text.markdown(f"**Epoch {epoch + 1}/{epochs}…**")
         raise_if_cancelled("training")
+        lr_history.append(optimizer.param_groups[0]['lr'])
+        t0 = _time.time()
         t_loss, t_d_acc, t_l_acc, t_d_loss, t_l_loss = train_epoch_multitask(
             model, train_loader, criterion, optimizer, device,
             should_stop=lambda: raise_if_cancelled("training"))
         v_loss, v_d_acc, v_l_acc, v_d_loss, v_l_loss = validate_multitask(
             model, val_loader, criterion, device,
             should_stop=lambda: raise_if_cancelled("training"))
+        time_history.append(_time.time() - t0)
         _scheduler_step(scheduler, v_loss, lr_schedule)
         if v_loss < best_val_loss:
             best_val_loss = v_loss
@@ -430,7 +486,9 @@ def _run_multitask(device, data_path, batch_size, epochs, lr,
             f"| Metric | Train | Val |\n|---|---|---|\n"
             f"| **Total Loss** | {t_loss:.4f} | {v_loss:.4f} |\n"
             f"| **Digit Acc** | {t_d_acc:.2f}% | {v_d_acc:.2f}% |\n"
-            f"| **Lang Acc** | {t_l_acc:.2f}% | {v_l_acc:.2f}% |"
+            f"| **Lang Acc** | {t_l_acc:.2f}% | {v_l_acc:.2f}% |  \n"
+            f"| **LR** | {lr_history[-1]:.2e} | — |  \n"
+            f"| **Epoch time** | {time_history[-1]:.1f}s | — |"
         )
         progress_bar.progress((epoch + 1) / int(epochs))
 
@@ -487,6 +545,25 @@ def _run_multitask(device, data_path, batch_size, epochs, lr,
         st.download_button("Download Multi-Task Report (.txt)",
                            f.read(), 'training_report_multitask.txt', 'text/plain')
 
+    # ── Save all plots ────────────────────────────────────────────────
+    run_dir = make_run_dir("MultiTaskCNN", int(epochs), batch_size, lr, weight_decay)
+    save_fig(plot_multitask_training_history(history), run_dir, "01_multitask_dashboard.png")
+    save_fig(plot_lr_history(lr_history),              run_dir, "02_lr_schedule.png")
+    save_fig(plot_time_per_epoch(time_history),        run_dir, "03_time_per_epoch.png")
+    save_fig(plot_confusion_matrix(d_true, d_pred_lst,
+             ["Empty" if l == 0 else str(l) for l in sorted(set(d_true))]),
+             run_dir, "04_confusion_digit.png")
+    save_fig(plot_lang_confusion_matrix(l_true, l_pred_lst), run_dir, "05_confusion_lang.png")
+    save_run_metadata(run_dir, {
+        "model": "MultiTaskCNN", "epochs": int(epochs),
+        "batch_size": batch_size, "lr": lr, "weight_decay": weight_decay,
+        "lr_schedule": lr_schedule, "best_val_loss": best_val_loss,
+        "test_digit_acc": t_d_acc, "test_lang_acc": t_l_acc,
+        "total_time_s": sum(time_history),
+    })
+    st.success(f"All plots saved to `{run_dir}/`")
+    st.sidebar.success(f"Plots → `{run_dir}/`")
+
 
 def _run_singletask(device, data_path, batch_size, epochs, lr, dataset_mode,
                     weight_decay: float = 1e-4, lr_schedule: str = "ReduceLROnPlateau"):
@@ -512,15 +589,20 @@ def _run_singletask(device, data_path, batch_size, epochs, lr, dataset_mode,
         st.markdown("#### Accuracy Curve"); acc_ph = st.empty()
 
     best_val_loss = float('inf')
-    history = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': []}
+    history      = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': []}
+    lr_history   = []
+    time_history = []
 
     for epoch in range(int(epochs)):
         status_text.markdown(f"**Running Epoch {epoch + 1}/{epochs}…**")
         raise_if_cancelled("training")
+        lr_history.append(optimizer.param_groups[0]['lr'])
+        t0 = _time.time()
         t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device,
                                      should_stop=lambda: raise_if_cancelled("training"))
         v_loss, v_acc = validate(model, val_loader, criterion, device,
                                   should_stop=lambda: raise_if_cancelled("training"))
+        time_history.append(_time.time() - t0)
         _scheduler_step(scheduler, v_loss, lr_schedule)
         if v_loss < best_val_loss:
             best_val_loss = v_loss
@@ -532,7 +614,9 @@ def _run_singletask(device, data_path, batch_size, epochs, lr, dataset_mode,
         metrics_tbl.markdown(
             f"| Metric | Train | Val |\n|---|---|---|\n"
             f"| **Loss** | {t_loss:.4f} | {v_loss:.4f} |\n"
-            f"| **Accuracy** | {t_acc:.2f}% | {v_acc:.2f}% |"
+            f"| **Accuracy** | {t_acc:.2f}% | {v_acc:.2f}% |  \n"
+            f"| **LR** | {lr_history[-1]:.2e} | — |  \n"
+            f"| **Epoch time** | {time_history[-1]:.1f}s | — |"
         )
         progress_bar.progress((epoch + 1) / int(epochs))
 
@@ -551,7 +635,8 @@ def _run_singletask(device, data_path, batch_size, epochs, lr, dataset_mode,
                                               should_stop=lambda: raise_if_cancelled("training"))
         all_lbl     = sorted(set(y_true) | set(y_pred))
         class_names = ["Empty" if l == 0 else str(l) for l in all_lbl]
-        st.pyplot(plot_confusion_matrix(y_true, y_pred, class_names)); plt.close('all')
+        cm_fig = plot_confusion_matrix(y_true, y_pred, class_names)
+        st.pyplot(cm_fig); plt.close('all')
         cm_arr = confusion_matrix(y_true, y_pred, labels=all_lbl)
         pca    = cm_arr.diagonal() / cm_arr.sum(axis=1).clip(min=1) * 100
         st.markdown("#### Per-Class Accuracy")
@@ -571,3 +656,19 @@ def _run_singletask(device, data_path, batch_size, epochs, lr, dataset_mode,
     with open(rpt, 'r', encoding='utf-8') as f:
         st.download_button("Download Training Report (.txt)",
                            f.read(), 'training_report.txt', 'text/plain')
+
+    # ── Save all plots ────────────────────────────────────────────────
+    run_dir = make_run_dir("DigitCNN", int(epochs), batch_size, lr, weight_decay)
+    save_fig(plot_singletask_summary(history, lr_history, time_history), run_dir, "01_summary.png")
+    save_fig(plot_lr_history(lr_history),       run_dir, "02_lr_schedule.png")
+    save_fig(plot_time_per_epoch(time_history),  run_dir, "03_time_per_epoch.png")
+    save_fig(cm_fig, run_dir, "04_confusion_matrix.png")
+    save_run_metadata(run_dir, {
+        "model": "DigitCNN", "dataset_mode": dataset_mode,
+        "epochs": int(epochs), "batch_size": batch_size,
+        "lr": lr, "weight_decay": weight_decay, "lr_schedule": lr_schedule,
+        "best_val_loss": best_val_loss, "test_acc": t_acc,
+        "total_time_s": sum(time_history),
+    })
+    st.success(f"All plots saved to `{run_dir}/`")
+    st.sidebar.success(f"Plots → `{run_dir}/`")

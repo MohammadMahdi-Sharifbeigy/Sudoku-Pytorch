@@ -1,4 +1,8 @@
 """Dark-themed Matplotlib plot helpers for the Streamlit UI."""
+import json
+import os
+from datetime import datetime
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -143,3 +147,105 @@ def plot_multitask_training_history(history: dict):
 
     plt.tight_layout()
     return fig
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# New: LR, time, single-task summary, and save helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def plot_lr_history(lr_history: list):
+    """Learning rate over epochs (log scale)."""
+    epochs = list(range(1, len(lr_history) + 1))
+    fig, ax = plt.subplots(figsize=(8, 3))
+    fig.patch.set_facecolor(_BG_FIG)
+    ax.plot(epochs, lr_history, color='#ffcc02', linewidth=2,
+            marker='o', markersize=4, markevery=max(1, len(epochs) // 20))
+    _style_ax(ax, 'Learning Rate Schedule', ylabel='LR')
+    ax.set_yscale('log')
+    plt.tight_layout()
+    return fig
+
+
+def plot_time_per_epoch(time_history: list):
+    """Bar chart of seconds per epoch + cumulative line."""
+    epochs     = list(range(1, len(time_history) + 1))
+    cumulative = [sum(time_history[:i + 1]) for i in range(len(time_history))]
+
+    fig, ax1 = plt.subplots(figsize=(8, 3))
+    fig.patch.set_facecolor(_BG_FIG)
+    ax1.bar(epochs, time_history, color=_C_TRAIN, alpha=0.7, label='Epoch time (s)')
+    _style_ax(ax1, 'Training Time per Epoch', ylabel='Seconds')
+
+    ax2 = ax1.twinx()
+    ax2.set_facecolor(_BG_AX)
+    ax2.plot(epochs, cumulative, color=_C_VAL, linewidth=2, label='Cumulative (s)')
+    ax2.set_ylabel('Cumulative (s)', color='#aaa', fontsize=9)
+    ax2.tick_params(colors='white')
+    for spine in ax2.spines.values():
+        spine.set_color('#333')
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2,
+               facecolor='#1e1e2e', edgecolor='#444', labelcolor='white', fontsize=8)
+    plt.tight_layout()
+    return fig
+
+
+def plot_singletask_summary(history: dict, lr_history: list, time_history: list):
+    """4-panel dashboard: loss, accuracy, LR, time per epoch."""
+    epochs = list(range(1, len(history['Train Loss']) + 1))
+    fig, axes = plt.subplots(2, 2, figsize=(13, 7))
+    fig.patch.set_facecolor(_BG_FIG)
+    fig.suptitle('Training Summary', color='white', fontsize=14, fontweight='bold')
+
+    def _plot(ax, t_key, v_key, title, ylabel=''):
+        ax.plot(epochs, history[t_key], color=_C_TRAIN, linewidth=2, label='Train',
+                marker='o', markersize=3, markevery=max(1, len(epochs) // 10))
+        ax.plot(epochs, history[v_key], color=_C_VAL,   linewidth=2, label='Val',
+                marker='s', markersize=3, markevery=max(1, len(epochs) // 10))
+        _style_ax(ax, title, ylabel=ylabel)
+        ax.legend(facecolor='#1e1e2e', edgecolor='#444', labelcolor='white', fontsize=8)
+
+    _plot(axes[0, 0], 'Train Loss', 'Val Loss', 'Loss',          ylabel='Loss')
+    _plot(axes[0, 1], 'Train Acc',  'Val Acc',  'Accuracy (%)',  ylabel='Acc %')
+
+    axes[1, 0].plot(epochs, lr_history, color='#ffcc02', linewidth=2,
+                    marker='o', markersize=3, markevery=max(1, len(epochs) // 10))
+    axes[1, 0].set_yscale('log')
+    _style_ax(axes[1, 0], 'Learning Rate', ylabel='LR (log)')
+
+    axes[1, 1].bar(epochs, time_history, color=_C_TRAIN, alpha=0.8)
+    _style_ax(axes[1, 1], 'Time per Epoch (s)', ylabel='Seconds')
+
+    plt.tight_layout()
+    return fig
+
+
+def make_run_dir(model_tag: str, epochs: int, batch_size: int,
+                 lr: float, weight_decay: float) -> str:
+    """Create timestamped run directory under runs/."""
+    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = (f"{model_tag}"
+            f"_ep{epochs}"
+            f"_bs{batch_size}"
+            f"_lr{lr:.0e}"
+            f"_wd{weight_decay:.0e}"
+            f"_{ts}")
+    path = os.path.join("runs", name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def save_fig(fig, run_dir: str, filename: str) -> str:
+    """Save figure to run_dir and close it. Returns saved path."""
+    path = os.path.join(run_dir, filename)
+    fig.savefig(path, dpi=120, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return path
+
+
+def save_run_metadata(run_dir: str, meta: dict) -> None:
+    """Write training metadata as JSON into the run directory."""
+    with open(os.path.join(run_dir, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, default=str)
