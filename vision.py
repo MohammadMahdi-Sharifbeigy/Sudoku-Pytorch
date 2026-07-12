@@ -14,6 +14,15 @@ import imutils
 from sklearn.cluster import KMeans
 
 
+def _check_stop(should_stop):
+    if should_stop is not None:
+        should_stop()
+
+
+DEFAULT_GRID_THRESHOLD_COMBOS = [(41, 8), (21, 5), (61, 10), (31, 6), (11, 3), (81, 12)]
+DEFAULT_CELL_THRESHOLD_COMBOS = [(91, 7), (51, 5), (71, 9), (31, 4), (111, 10), (41, 6)]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Basic image helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -24,10 +33,35 @@ def resize_and_maintain_aspect_ratio(input_image, new_width):
     return cv2.resize(input_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
 
 
-def apply_grayscale_blur_and_threshold(img, method="mean", blocksize=91, c=7):
-    """Accepts RGB 3-channel or single-channel grayscale input."""
-    blurred = cv2.GaussianBlur(img, (3, 3), 0)
-    gray = cv2.cvtColor(blurred, cv2.COLOR_RGB2GRAY) if len(blurred.shape) == 3 else blurred
+def sharpen_image(img, use_nlm: bool = False, center: int = 5):
+    """Sharpen to recover detail lost to camera / scanner blur.
+
+    center : Laplacian kernel centre weight (default 5).
+             Higher → stronger sharpening, may introduce ringing on very sharp images.
+             Kernel: [[0,-1,0],[-1,center,-1],[0,-1,0]]  (neighbours always -1).
+
+    use_nlm=False : Laplacian kernel only — instant, mild-to-moderate blur.
+    use_nlm=True  : NLM denoising first, then Laplacian — heavy blur, ~1-3 s extra.
+    """
+    if use_nlm:
+        if len(img.shape) == 3:
+            img = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
+        else:
+            img = cv2.fastNlMeansDenoising(img, None, 10, 7, 21)
+
+    kernel = np.array([[0,      -1,      0],
+                       [-1,  center,    -1],
+                       [0,      -1,      0]], dtype=np.float32)
+    return cv2.filter2D(img, -1, kernel)
+
+
+def apply_grayscale_blur_and_threshold(img, method="mean", blocksize=91, c=7, blur_k=3):
+    """Accepts RGB 3-channel or single-channel grayscale input.
+    blur_k : GaussianBlur kernel size (odd int ≥1; 1 = skip blur entirely).
+    """
+    if blur_k > 1:
+        img = cv2.GaussianBlur(img, (blur_k, blur_k), 0)
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img
     am = cv2.ADAPTIVE_THRESH_MEAN_C if method == "mean" else cv2.ADAPTIVE_THRESH_GAUSSIAN_C
     thresh = cv2.adaptiveThreshold(gray, 255, am, cv2.THRESH_BINARY, blocksize, c)
     return cv2.bitwise_not(thresh)
@@ -160,7 +194,7 @@ def _contour_to_quad(contour):
 # Grid boundary detection
 # ─────────────────────────────────────────────────────────────────────────────
 
-def find_grid_contour_candidates(img):
+def find_grid_contour_candidates(img, threshold_combos=None, blur_k=3, should_stop=None):
     """
     Detect the Sudoku grid boundary using contours across multiple threshold
     parameter combinations. NMS removes duplicate candidates from different params.
@@ -174,8 +208,10 @@ def find_grid_contour_candidates(img):
     img_area = img_h * img_w
     all_candidates = []   # (score, bbox, pts, raw_contour)
 
-    for blocksize, c_val in [(41, 8), (21, 5), (61, 10), (31, 6), (11, 3), (81, 12)]:
-        thresh = apply_grayscale_blur_and_threshold(img, blocksize=blocksize, c=c_val)
+    threshold_combos = threshold_combos or DEFAULT_GRID_THRESHOLD_COMBOS
+    for blocksize, c_val in threshold_combos:
+        _check_stop(should_stop)
+        thresh = apply_grayscale_blur_and_threshold(img, blocksize=blocksize, c=c_val, blur_k=blur_k)
 
         # Close gaps in thin / broken (e.g. hand-drawn) grid lines so the outer
         # boundary forms a single closed contour.
@@ -183,11 +219,13 @@ def find_grid_contour_candidates(img):
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
 
         for retr in [cv2.RETR_EXTERNAL, cv2.RETR_LIST]:
+            _check_stop(should_stop)
             contours = imutils.grab_contours(
                 cv2.findContours(thresh.copy(), retr, cv2.CHAIN_APPROX_SIMPLE))
             contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
             for contour in contours[:8]:
+                _check_stop(should_stop)
                 area       = cv2.contourArea(contour)
                 area_ratio = area / img_area
                 if not (0.04 < area_ratio < 0.97):
@@ -216,6 +254,7 @@ def find_grid_contour_candidates(img):
 
     M_matrices, warped_images, contour_list = [], [], []
     for score, bbox, (pts, contour) in kept:
+        _check_stop(should_stop)
         try:
             M, warped = perform_four_point_transform(img, pts, pad=20)
             if warped.shape[0] >= 50 and warped.shape[1] >= 50:
@@ -232,7 +271,16 @@ def find_grid_contour_candidates(img):
 # Cell extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def locate_cells_within_grid(grid_img):
+def locate_cells_within_grid(
+    grid_img,
+    threshold_combos=None,
+    blur_k=3,
+    area_threshold=4,
+    erode_enabled=True,
+    erode_kernel_size=3,
+    erode_iterations=1,
+    should_stop=None,
+):
     """
     Find 81 cells inside a perspective-corrected grid image.
 
@@ -248,9 +296,11 @@ def locate_cells_within_grid(grid_img):
     expected_cell_area = grid_area / 81.0
     best_cells        = []
 
-    for blocksize, c_val in [(91, 7), (51, 5), (71, 9), (31, 4), (111, 10), (41, 6)]:
+    threshold_combos = threshold_combos or DEFAULT_CELL_THRESHOLD_COMBOS
+    for blocksize, c_val in threshold_combos:
+        _check_stop(should_stop)
         thresh = apply_grayscale_blur_and_threshold(
-            grid_img, method="mean", blocksize=blocksize, c=c_val)
+            grid_img, method="mean", blocksize=blocksize, c=c_val, blur_k=blur_k)
 
         contours = imutils.grab_contours(
             cv2.findContours(thresh.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE))
@@ -258,6 +308,7 @@ def locate_cells_within_grid(grid_img):
 
         candidates = []
         for contour in contours:
+            _check_stop(should_stop)
             area = cv2.contourArea(contour)
             frac = area / grid_area
             if not (0.003 < frac < 0.022):
@@ -284,6 +335,7 @@ def locate_cells_within_grid(grid_img):
         # Extract each kept cell
         valid_cells = []
         for score, bbox, contour in kept:
+            _check_stop(should_stop)
             mask = np.zeros(thresh.shape, dtype=np.uint8)
             cv2.drawContours(mask, [contour], 0, 255, cv2.FILLED)
             y_px, x_px = np.where(mask == 255)
@@ -291,17 +343,15 @@ def locate_cells_within_grid(grid_img):
                 continue
             cell_img = thresh[min(y_px):max(y_px)+1, min(x_px):max(x_px)+1]
             has_digit, cell_img = check_for_digit_in_cell_image(
-                cell_img, area_threshold=4, apply_border=True)
+                cell_img, area_threshold=area_threshold, apply_border=True)
             if not has_digit:
                 # Digit may clip the cell border in perspective-distorted rows.
                 has_digit, cell_img = check_for_digit_in_cell_image(
-                    cell_img, area_threshold=4, apply_border=False)
-            if has_digit:
-                # Thicken digit strokes so perspective-compressed shapes (6→8, 9→8)
-                # retain their true proportions at 28×28. Applied after border
-                # clearing so grid lines are already gone.
-                _dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3 , 3))
-                cell_img = cv2.erode(cell_img, _dil_k, iterations=2)
+                    cell_img, area_threshold=area_threshold, apply_border=False)
+            if has_digit and erode_enabled and erode_iterations > 0:
+                _erode_k = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (erode_kernel_size, erode_kernel_size))
+                cell_img = cv2.erode(cell_img, _erode_k, iterations=erode_iterations)
             cell_img = center_and_resize_digit(cell_img) if has_digit else np.zeros((28, 28), dtype=np.uint8)
             moments  = cv2.moments(contour)
             if moments['m00'] == 0:
@@ -351,7 +401,16 @@ def _clear_border_components(binary):
     return out
 
 
-def slice_grid_into_cells(grid_img, n=9, pad_frac=0.02):
+def slice_grid_into_cells(
+    grid_img,
+    n=9,
+    pad_frac=0.02,
+    area_threshold=4,
+    erode_enabled=True,
+    erode_kernel_size=2,
+    erode_iterations=3,
+    should_stop=None,
+):
     """
     Deterministic fallback: split a square perspective-corrected grid into an
     exact n x n lattice. Always returns n*n cells in row-major order — no
@@ -366,6 +425,7 @@ def slice_grid_into_cells(grid_img, n=9, pad_frac=0.02):
     cells = []
     for r in range(n):
         for c in range(n):
+            _check_stop(should_stop)
             y0, y1 = int(round(r * ch)), int(round((r + 1) * ch))
             x0, x1 = int(round(c * cw)), int(round((c + 1) * cw))
             cell = grid_img[y0:y1, x0:x1]
@@ -380,10 +440,11 @@ def slice_grid_into_cells(grid_img, n=9, pad_frac=0.02):
                 inner, method="mean", blocksize=31, c=7)
             thr = _clear_border_components(thr)
             has_digit, thr = check_for_digit_in_cell_image(
-                thr, area_threshold=4, apply_border=False)
-            if has_digit:
-                _dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-                thr = cv2.erode(thr, _dil_k, iterations=2)
+                thr, area_threshold=area_threshold, apply_border=False)
+            if has_digit and erode_enabled and erode_iterations > 0:
+                _erode_k = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (erode_kernel_size, erode_kernel_size))
+                thr = cv2.erode(thr, _erode_k, iterations=erode_iterations)
             cell_img = center_and_resize_digit(thr) if has_digit \
                 else np.zeros((28, 28), dtype=np.uint8)
 
@@ -459,7 +520,20 @@ def build_grid_from_partial_cells(cells, n=9):
     return out
 
 
-def get_valid_cells_from_image(img, grid_size=576):
+def get_valid_cells_from_image(
+    img,
+    grid_size=576,
+    grid_threshold_combos=None,
+    cell_threshold_combos=None,
+    blur_k=3,
+    area_threshold=4,
+    erode_enabled=True,
+    contour_erode_kernel_size=3,
+    contour_erode_iterations=1,
+    slice_erode_kernel_size=2,
+    slice_erode_iterations=3,
+    should_stop=None,
+):
     """
     Full pipeline: detect grid boundary -> warp -> extract 81 cells.
 
@@ -473,7 +547,8 @@ def get_valid_cells_from_image(img, grid_size=576):
       3. Slice fallback: if too few cells were found (faint / wavy / hand-drawn
          grids), square-warp the best candidate and slice a deterministic 9x9.
     """
-    M_matrices, warped_images, contour_list = find_grid_contour_candidates(img)
+    M_matrices, warped_images, contour_list = find_grid_contour_candidates(
+        img, threshold_combos=grid_threshold_combos, blur_k=blur_k, should_stop=should_stop)
     if not warped_images:
         raise Exception(
             "No grid boundary detected. Make sure the Sudoku grid is clearly "
@@ -484,7 +559,17 @@ def get_valid_cells_from_image(img, grid_size=576):
     # Track the best candidate (most cells) for recovery / fallback.
     best = None  # (n_cells, cells, M, grid_image, contour)
     for i, grid_image in enumerate(warped_images):
-        cells = locate_cells_within_grid(grid_image)
+        _check_stop(should_stop)
+        cells = locate_cells_within_grid(
+            grid_image,
+            threshold_combos=cell_threshold_combos,
+            blur_k=blur_k,
+            area_threshold=area_threshold,
+            erode_enabled=erode_enabled,
+            erode_kernel_size=contour_erode_kernel_size,
+            erode_iterations=contour_erode_iterations,
+            should_stop=should_stop,
+        )
         if len(cells) == 81:
             return sort_cells_into_grid(cells), M_matrices[i], grid_image
         if best is None or len(cells) > best[0]:
@@ -509,7 +594,14 @@ def get_valid_cells_from_image(img, grid_size=576):
            if len(approx) == 4 else _contour_to_quad(best_contour))
 
     M_sq, grid_sq = perform_four_point_transform(img, pts, size=grid_size)
-    cells = slice_grid_into_cells(grid_sq)
+    cells = slice_grid_into_cells(
+        grid_sq,
+        area_threshold=area_threshold,
+        erode_enabled=erode_enabled,
+        erode_kernel_size=slice_erode_kernel_size,
+        erode_iterations=slice_erode_iterations,
+        should_stop=should_stop,
+    )
     return cells, M_sq, grid_sq
 
 
@@ -517,13 +609,16 @@ def get_valid_cells_from_image(img, grid_size=576):
 # Prediction & visualisation (unchanged API)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_predicted_sudoku_grid_torch(model, cells, device):
+def get_predicted_sudoku_grid_torch(model, cells, device, should_stop=None):
+    _check_stop(should_stop)
     digit_images = np.array([c['img'] for c in cells if c['contains_digit']])
     if len(digit_images) == 0:
         return np.zeros((9, 9), dtype=int)
     tensors = torch.from_numpy(digit_images).float().unsqueeze(1).div(255.0).to(device)
+    _check_stop(should_stop)
     with torch.no_grad():
         preds = torch.argmax(model(tensors), dim=1).cpu().numpy()
+    _check_stop(should_stop)
     indices = np.where([c['contains_digit'] for c in cells])[0]
     grid    = np.zeros(81, dtype=int)
     grid[indices] = preds

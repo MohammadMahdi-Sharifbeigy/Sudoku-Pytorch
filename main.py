@@ -21,14 +21,16 @@ from model import (DigitCNN, FocalLoss,
                    UnifiedDigitCNN, decode_unified_class, UNIFIED_NUM_CLASSES)
 from solver import SudokuSolver
 from vision import (
+    DEFAULT_CELL_THRESHOLD_COMBOS,
+    DEFAULT_GRID_THRESHOLD_COMBOS,
     resize_and_maintain_aspect_ratio,
     apply_grayscale_blur_and_threshold,
+    sharpen_image,
     get_valid_cells_from_image as vision_orig_get_cells,
     get_predicted_sudoku_grid_torch,
     generate_solution_image,
     plot_cell_images_in_grid,
 )
-import vision_a
 from train import (train_epoch, validate, collect_predictions,
                    train_epoch_multitask, validate_multitask, collect_predictions_multitask)
 from data_utils import (get_dataloaders, get_dataloaders_mnist_hoda, get_dataloaders_all,
@@ -41,10 +43,9 @@ from optimize_model import run_optimization_and_benchmark, run_optimization_and_
 def save_debug_outputs(
     image_name: str,
     img_rgb: np.ndarray,
-    cells_a, board_a, err_a,
-    cells_b, board_b, err_b,
     cells_selected, board_selected,
-    pipeline_choice: str,
+    pipeline_name: str,
+    error: str = None,
     out_root: str = "debug_outputs",
 ) -> str:
     """Save all intermediate outputs after inference for offline inspection."""
@@ -83,29 +84,17 @@ def save_debug_outputs(
             flag = "D" if c['contains_digit'] else "E"
             cv2.imwrite(os.path.join(cells_dir, f"r{r}c{col}_{flag}.png"), c['img'])
 
-    save_board(board_a, "A")
-    save_board(board_b, "B")
     save_board(board_selected, "selected")
-    save_cells_mosaic(cells_a, "A")
-    save_cells_mosaic(cells_b, "B")
     save_cells_mosaic(cells_selected, "selected")
-    save_cell_images(cells_a, "A")
-    save_cell_images(cells_b, "B")
+    save_cell_images(cells_selected, "selected")
 
     # summary JSON
     summary = {
         "image": image_name,
-        "pipeline_choice": pipeline_choice,
-        "pipeline_A": {
-            "success": cells_a is not None,
-            "error": err_a,
-            "digit_count": sum(c['contains_digit'] for c in cells_a) if cells_a else None,
-        },
-        "pipeline_B": {
-            "success": cells_b is not None,
-            "error": err_b,
-            "digit_count": sum(c['contains_digit'] for c in cells_b) if cells_b else None,
-        },
+        "pipeline": pipeline_name,
+        "success": cells_selected is not None,
+        "error": error,
+        "digit_count": sum(c['contains_digit'] for c in cells_selected) if cells_selected else None,
     }
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
@@ -113,10 +102,161 @@ def save_debug_outputs(
     return out_dir
 
 
+def format_threshold_combos(combos):
+    return "; ".join(f"{bs},{c}" for bs, c in combos)
+
+
+def threshold_combo_label(index, combo):
+    blocksize, c_val = combo
+    return f"Combo {index + 1}: bs={blocksize}, C={c_val}"
+
+
+def parse_threshold_combos(raw_text, fallback):
+    combos = []
+    for chunk in raw_text.replace("\n", ";").split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts = [p.strip() for p in chunk.split(",")]
+        if len(parts) != 2:
+            continue
+        try:
+            blocksize, c_val = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if blocksize >= 3 and blocksize % 2 == 1 and c_val >= 0:
+            combos.append((blocksize, c_val))
+    return combos or list(fallback)
+
+
+def threshold_combos_to_frame(combos):
+    return pd.DataFrame(
+        [{"blocksize": int(blocksize), "C": int(c_val)} for blocksize, c_val in combos],
+        columns=["blocksize", "C"],
+    )
+
+
+def parse_threshold_combo_frame(frame, fallback):
+    combos = []
+    try:
+        rows = frame.to_dict("records")
+    except AttributeError:
+        rows = []
+    for row in rows:
+        try:
+            blocksize = int(row.get("blocksize"))
+            c_val = int(row.get("C"))
+        except (TypeError, ValueError):
+            continue
+        if blocksize >= 3 and blocksize % 2 == 1 and c_val >= 0:
+            combos.append((blocksize, c_val))
+    return combos or list(fallback)
+
+
+PREPROCESS_DEFAULTS = {
+    "enable_sharpen": True,
+    "use_nlm": False,
+    "sharpen_center": 5,
+    "blur_k": 3,
+    "thresh_method": "mean",
+    "thresh_bs": 41,
+    "thresh_c": 8,
+    "area_thresh": 4.0,
+    "grid_combo_text": format_threshold_combos(DEFAULT_GRID_THRESHOLD_COMBOS),
+    "selected_grid_combo_label": threshold_combo_label(0, DEFAULT_GRID_THRESHOLD_COMBOS[0]),
+    "grid_combo_mode": "Auto loop all combos",
+    "erode_enabled": True,
+    "erode_kernel_size": 3,
+    "erode_iterations": 1,
+    "slice_erode_kernel_size": 2,
+    "slice_erode_iterations": 3,
+}
+
+
+def applied_preprocess_config():
+    if "preprocess_applied" not in st.session_state:
+        st.session_state.preprocess_applied = dict(PREPROCESS_DEFAULTS)
+    return st.session_state.preprocess_applied
+
+
+def init_preprocess_draft(config):
+    draft_defaults = {
+        "draft_sh_en": config["enable_sharpen"],
+        "draft_sh_nlm": config["use_nlm"],
+        "draft_sh_ctr": config["sharpen_center"],
+        "draft_blur_k": config["blur_k"],
+        "draft_thr_m": config["thresh_method"],
+        "draft_thr_bs": config["thresh_bs"],
+        "draft_thr_c": config["thresh_c"],
+        "draft_area_thr": config["area_thresh"],
+        "draft_grid_combo_text": config["grid_combo_text"],
+        "draft_selected_grid_combo": config["selected_grid_combo_label"],
+        "draft_grid_combo_mode": config["grid_combo_mode"],
+        "draft_erode_enabled": config["erode_enabled"],
+        "draft_erode_kernel": config["erode_kernel_size"],
+        "draft_erode_iter": config["erode_iterations"],
+        "draft_slice_erode_kernel": config["slice_erode_kernel_size"],
+        "draft_slice_erode_iter": config["slice_erode_iterations"],
+    }
+    for key, value in draft_defaults.items():
+        st.session_state.setdefault(key, value)
+
+
+def current_preprocess_draft():
+    return {
+        "enable_sharpen": st.session_state.draft_sh_en,
+        "use_nlm": st.session_state.draft_sh_nlm if st.session_state.draft_sh_en else False,
+        "sharpen_center": st.session_state.draft_sh_ctr,
+        "blur_k": st.session_state.draft_blur_k,
+        "thresh_method": st.session_state.draft_thr_m,
+        "thresh_bs": st.session_state.draft_thr_bs,
+        "thresh_c": st.session_state.draft_thr_c,
+        "area_thresh": st.session_state.draft_area_thr,
+        "grid_combo_text": st.session_state.draft_grid_combo_text,
+        "selected_grid_combo_label": st.session_state.draft_selected_grid_combo,
+        "grid_combo_mode": st.session_state.draft_grid_combo_mode,
+        "erode_enabled": st.session_state.draft_erode_enabled,
+        "erode_kernel_size": st.session_state.draft_erode_kernel,
+        "erode_iterations": st.session_state.draft_erode_iter,
+        "slice_erode_kernel_size": st.session_state.draft_slice_erode_kernel,
+        "slice_erode_iterations": st.session_state.draft_slice_erode_iter,
+    }
+
+
+class RunCancelled(Exception):
+    pass
+
+
+def cancel_flag_path(scope):
+    return os.path.join(os.getcwd(), f".cancel_{scope}")
+
+
+def request_cancel(scope):
+    with open(cancel_flag_path(scope), "w", encoding="utf-8") as f:
+        f.write(datetime.now().isoformat())
+
+
+def clear_cancel(scope):
+    path = cancel_flag_path(scope)
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def raise_if_cancelled(scope):
+    if os.path.exists(cancel_flag_path(scope)):
+        raise RunCancelled(f"{scope.title()} stopped by user.")
+
+
+def render_stop_button(scope, label):
+    if st.sidebar.button(label, type="secondary", width="stretch", key=f"stop_{scope}_button"):
+        request_cancel(scope)
+        st.sidebar.warning(f"Stop requested for {scope}.")
+
+
 # --- UI Configuration ---
 st.set_page_config(
     page_title="AI Sudoku Solver",
-    page_icon="🧩",
+    page_icon="S",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -440,370 +580,774 @@ class UnifiedDigitOnlyWrapper:
 # MODE 1: INFERENCE (SOLVE SUDOKU)
 # ==========================================
 if app_mode == "Inference (Solve)":
-    st.markdown("### Upload Sudoku Image")
-    uploaded_file = st.file_uploader("Drag and drop your Sudoku image here", type=["jpg", "png", "jpeg"])
+    render_stop_button("inference", "Stop inference")
 
-    if uploaded_file is not None:
-        image_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        img = cv2.imdecode(image_bytes, cv2.IMREAD_COLOR)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = resize_and_maintain_aspect_ratio(input_image=img, new_width=1000)
+    # ══════════════════════════════════════════════════════════════════
+    # SIDEBAR — loaded BEFORE image upload so controls are always visible
+    # ══════════════════════════════════════════════════════════════════
 
-        # ── Model paths ───────────────────────────────────────────────
-        _paths = {
-            'persian_pt':  'models/best_model_persian.pt',
-            'english_pt':  'models/best_model_english.pt',
-            'default_pt':  'models/best_model.pt',
-            'mt_pt':       'models/best_model_multitask.pt',
-            'unified_pt':  'models/best_model_unified20.pt',
-            'persian_onnx':'models/best_model_persian.onnx',
-            'default_onnx':'models/best_model.onnx',
-            'mt_onnx':     'models/best_model_multitask.onnx',
-            'unified_onnx':'models/best_model_unified20.onnx',
-        }
+    _paths = {
+        'persian_pt':  'models/best_model_persian.pt',
+        'english_pt':  'models/best_model_english.pt',
+        'default_pt':  'models/best_model.pt',
+        'mt_pt':       'models/best_model_multitask.pt',
+        'unified_pt':  'models/best_model_unified20.pt',
+        'persian_onnx':'models/best_model_persian.onnx',
+        'default_onnx':'models/best_model.onnx',
+        'mt_onnx':     'models/best_model_multitask.onnx',
+        'unified_onnx':'models/best_model_unified20.onnx',
+    }
 
-        # ── Sidebar toggles ────────────────────────────────────────────
-        st.sidebar.markdown("### Model Selection")
+    # ── Model selection ────────────────────────────────────────────
+    st.sidebar.markdown("### Model Selection")
 
-        use_persian = st.sidebar.toggle(
-            "Persian image (فارسی)",
-            value=False,
-            help="ON → loads best_model_persian.pt (DigitCNN trained on Hoda). "
-                 "Off → uses English model by default.",
-            disabled=not os.path.exists(_paths['persian_pt']),
+    use_persian = st.sidebar.toggle(
+        "Persian image (فارسی)",
+        value=False,
+        help="ON → loads best_model_persian.pt (DigitCNN trained on Hoda). "
+             "Off → uses English model by default.",
+        disabled=not os.path.exists(_paths['persian_pt']),
+    )
+
+    available_mt_models = {}
+    if os.path.exists(_paths['mt_pt']):
+        available_mt_models["Multi-Task CNN (digit + language head)"] = 'mt'
+    if os.path.exists(_paths['unified_pt']):
+        available_mt_models["Unified 20-Class (MobileNet/ShuffleNet)"] = 'unified'
+
+    use_multimodel = st.sidebar.toggle(
+        "Auto-detect language (multi-model)",
+        value=False,
+        help="ON → predicts digit AND language per cell automatically. "
+             "Overrides Persian toggle.",
+        disabled=len(available_mt_models) == 0,
+    )
+
+    if use_multimodel and available_mt_models:
+        selected_mt_label = st.sidebar.radio(
+            "Multi-model to use:",
+            list(available_mt_models.keys()),
+            index=0,
         )
-
-        available_mt_models = {}
-        if os.path.exists(_paths['mt_pt']):
-            available_mt_models["Multi-Task CNN (digit + language head)"] = 'mt'
-        if os.path.exists(_paths['unified_pt']):
-            available_mt_models["Unified 20-Class (MobileNet/ShuffleNet)"] = 'unified'
-
-        use_multimodel = st.sidebar.toggle(
-            "Auto-detect language (multi-model)",
-            value=False,
-            help="ON → predicts digit AND language per cell automatically. "
-                 "Overrides Persian toggle.",
-            disabled=len(available_mt_models) == 0,
-        )
-
-        if use_multimodel and available_mt_models:
-            selected_mt_label = st.sidebar.radio(
-                "Multi-model to use:",
-                list(available_mt_models.keys()),
-                index=0,
+        selected_mt_key = available_mt_models[selected_mt_label]
+        if selected_mt_key == 'unified':
+            unified_bb = st.sidebar.selectbox(
+                "Backbone (must match training)",
+                ["mobilenet_v3_small", "shufflenet_v2_x0_5"],
             )
-            selected_mt_key = available_mt_models[selected_mt_label]
-            if selected_mt_key == 'unified':
-                unified_bb = st.sidebar.selectbox(
-                    "Backbone (must match training)",
-                    ["mobilenet_v3_small", "shufflenet_v2_x0_5"],
-                )
-        else:
-            selected_mt_key = None
-            unified_bb      = "mobilenet_v3_small"
+    else:
+        selected_mt_key = None
+        unified_bb      = "mobilenet_v3_small"
 
-        # ── ONNX acceleration ──────────────────────────────────────────
-        use_onnx = False
-        onnx_avail = False
-        try:
-            import onnxruntime  # noqa: F401
-            if use_multimodel:
-                _onnx_candidate = _paths['mt_onnx'] if selected_mt_key == 'mt' else _paths['unified_onnx']
-            elif use_persian:
-                _onnx_candidate = _paths['persian_onnx']
+    # ── ONNX acceleration ──────────────────────────────────────────
+    use_onnx = False
+    onnx_avail = False
+    _onnx_candidate = ''
+    try:
+        import onnxruntime  # noqa: F401
+        if use_multimodel:
+            _onnx_candidate = _paths['mt_onnx'] if selected_mt_key == 'mt' else _paths['unified_onnx']
+        elif use_persian:
+            _onnx_candidate = _paths['persian_onnx']
+        else:
+            _onnx_candidate = _paths['default_onnx']
+        onnx_avail = os.path.exists(_onnx_candidate)
+    except ImportError:
+        st.sidebar.caption("onnxruntime not installed — ONNX unavailable.")
+
+    if onnx_avail:
+        use_onnx = st.sidebar.toggle("Use ONNX (faster ~2-5×)", value=True)
+
+    # ── Resolve flags ──────────────────────────────────────────────
+    is_multitask = use_multimodel and selected_mt_key == 'mt'
+    is_unified   = use_multimodel and selected_mt_key == 'unified'
+    is_persian   = use_persian and not use_multimodel
+
+    # ── Preprocessing parameter panel ─────────────────────────────
+    st.sidebar.markdown("---")
+    active_preprocess = applied_preprocess_config()
+    init_preprocess_draft(active_preprocess)
+    with st.sidebar.expander("Preprocessing Parameters", expanded=True):
+        st.markdown("**Sharpening**")
+        st.toggle("Enable", key="draft_sh_en",
+            help="Laplacian kernel sharpening before grid detection.")
+        if st.session_state.draft_sh_en:
+            st.toggle("NLM denoising first (slow, heavy blur)", key="draft_sh_nlm",
+                help="Non-local means removes noise before sharpening. ~1-3 s extra.")
+            st.slider(
+                "Kernel centre value", min_value=3, max_value=13, step=2, key="draft_sh_ctr",
+                help="Kernel [[0,-1,0],[-1,C,-1],[0,-1,0]]. Default=5. "
+                     "Higher=stronger sharpening; ≥9 may ring on clean images.")
+        st.markdown("---")
+        st.markdown("**Adaptive Threshold**")
+        st.select_slider(
+            "Gaussian blur kernel size", options=[1, 3, 5, 7], key="draft_blur_k",
+            help="1=skip blur (preserves thin strokes). 3=default.")
+        st.selectbox(
+            "Threshold method", ["mean", "gaussian"], key="draft_thr_m")
+        st.slider(
+            "blocksize (odd)", min_value=11, max_value=111, step=2, key="draft_thr_bs",
+            help="Neighbourhood size for local threshold.")
+        st.slider(
+            "C (subtracted from mean)", min_value=1, max_value=25, key="draft_thr_c",
+            help="Higher → thinner strokes. Lower → thicker strokes.")
+        st.markdown("---")
+        st.markdown("**Cell Digit Detection**")
+        st.slider(
+            "Min contour area (%)", min_value=0.5, max_value=10.0,
+            step=0.5, key="draft_area_thr",
+            help="Lower catches thin strokes like Persian ۱ (~3%).")
+        st.markdown("---")
+        st.markdown("**Grid Detection Combos**")
+        st.caption("Edit values directly. Add a row for another combo; clear a row to remove it.")
+        if st.button("Restore default combos", width="stretch"):
+            st.session_state.draft_grid_combo_text = format_threshold_combos(DEFAULT_GRID_THRESHOLD_COMBOS)
+            if "draft_grid_combo_table" in st.session_state:
+                del st.session_state["draft_grid_combo_table"]
+            st.rerun()
+        draft_grid_threshold_source = parse_threshold_combos(
+            st.session_state.draft_grid_combo_text, DEFAULT_GRID_THRESHOLD_COMBOS)
+        edited_grid_combo_frame = st.data_editor(
+            threshold_combos_to_frame(draft_grid_threshold_source),
+            key="draft_grid_combo_table",
+            hide_index=True,
+            num_rows="dynamic",
+            width="stretch",
+            column_config={
+                "blocksize": st.column_config.NumberColumn(
+                    "blocksize", min_value=3, step=2, help="Odd adaptive-threshold neighborhood size."),
+                "C": st.column_config.NumberColumn(
+                    "C", min_value=0, step=1, help="Constant subtracted from the local threshold."),
+            },
+        )
+        draft_grid_threshold_combos = parse_threshold_combo_frame(
+            edited_grid_combo_frame, DEFAULT_GRID_THRESHOLD_COMBOS)
+        st.session_state.draft_grid_combo_text = format_threshold_combos(draft_grid_threshold_combos)
+        draft_grid_combo_labels = [
+            threshold_combo_label(i, combo)
+            for i, combo in enumerate(draft_grid_threshold_combos)
+        ]
+        if st.session_state.draft_selected_grid_combo not in draft_grid_combo_labels:
+            st.session_state.draft_selected_grid_combo = draft_grid_combo_labels[0]
+        st.selectbox(
+            "Selected grid combo",
+            draft_grid_combo_labels,
+            key="draft_selected_grid_combo")
+        st.radio(
+            "Grid detection mode",
+            ["Auto loop all combos", "Use selected combo only"],
+            horizontal=True,
+            key="draft_grid_combo_mode")
+        st.caption(
+            f"Draft selected: `{st.session_state.draft_selected_grid_combo}`  |  "
+            f"Valid combos: `{len(draft_grid_threshold_combos)}`"
+        )
+        st.markdown("---")
+        st.markdown("**Digit Erosion**")
+        st.toggle(
+            "Enable erosion", key="draft_erode_enabled",
+            help="Erodes white digit strokes after digit cleanup. Disable to keep strokes unchanged.")
+        st.select_slider(
+            "Contour-path kernel", options=[1, 2, 3, 4, 5], key="draft_erode_kernel")
+        st.slider(
+            "Contour-path iterations", min_value=0, max_value=5, key="draft_erode_iter")
+        st.select_slider(
+            "Slice-fallback kernel", options=[1, 2, 3, 4, 5], key="draft_slice_erode_kernel")
+        st.slider(
+            "Slice-fallback iterations", min_value=0, max_value=5, key="draft_slice_erode_iter")
+
+        apply_col, reset_col = st.columns(2)
+        with apply_col:
+            apply_preprocess = st.button("Apply", type="primary", width="stretch")
+        with reset_col:
+            reset_preprocess = st.button("Reset", width="stretch")
+
+        draft_preprocess = current_preprocess_draft()
+        preprocess_dirty = draft_preprocess != active_preprocess
+
+        if apply_preprocess:
+            st.session_state.preprocess_applied = dict(draft_preprocess)
+            active_preprocess = st.session_state.preprocess_applied
+            preprocess_dirty = False
+            st.success("Preprocessing settings applied.")
+
+        if reset_preprocess:
+            st.session_state.preprocess_applied = dict(PREPROCESS_DEFAULTS)
+            for key in [k for k in st.session_state.keys() if k.startswith("draft_")]:
+                del st.session_state[key]
+            st.rerun()
+
+        active_preprocess = applied_preprocess_config()
+        preprocess_dirty = current_preprocess_draft() != active_preprocess
+        if preprocess_dirty:
+            st.warning("Draft changes are pending. Press Apply to use them.")
+        st.caption(
+            f"Active: blur `{active_preprocess['blur_k']}`, "
+            f"combo `{active_preprocess['selected_grid_combo_label']}`, "
+            f"mode `{active_preprocess['grid_combo_mode']}`, "
+            f"erosion `{'on' if active_preprocess['erode_enabled'] else 'off'}`"
+        )
+
+    grid_combo_text = active_preprocess["grid_combo_text"]
+    grid_threshold_combos = parse_threshold_combos(grid_combo_text, DEFAULT_GRID_THRESHOLD_COMBOS)
+    grid_combo_labels = [
+        threshold_combo_label(i, combo)
+        for i, combo in enumerate(grid_threshold_combos)
+    ]
+    selected_grid_combo_label = active_preprocess["selected_grid_combo_label"]
+    if selected_grid_combo_label not in grid_combo_labels:
+        selected_grid_combo_label = grid_combo_labels[0]
+    selected_grid_combo_idx = grid_combo_labels.index(selected_grid_combo_label)
+    selected_grid_combo = grid_threshold_combos[selected_grid_combo_idx]
+    grid_combo_mode = active_preprocess["grid_combo_mode"]
+    active_grid_threshold_combos = (
+        [selected_grid_combo]
+        if grid_combo_mode == "Use selected combo only"
+        else grid_threshold_combos
+    )
+    enable_sharpen = active_preprocess["enable_sharpen"]
+    use_nlm = active_preprocess["use_nlm"]
+    sharpen_center = active_preprocess["sharpen_center"]
+    blur_k = active_preprocess["blur_k"]
+    thresh_method = active_preprocess["thresh_method"]
+    thresh_bs = active_preprocess["thresh_bs"]
+    thresh_c = active_preprocess["thresh_c"]
+    area_thresh = active_preprocess["area_thresh"]
+    erode_enabled = active_preprocess["erode_enabled"]
+    erode_kernel_size = active_preprocess["erode_kernel_size"]
+    erode_iterations = active_preprocess["erode_iterations"]
+    slice_erode_kernel_size = active_preprocess["slice_erode_kernel_size"]
+    slice_erode_iterations = active_preprocess["slice_erode_iterations"]
+
+    # ══════════════════════════════════════════════════════════════════
+    # MAIN AREA — two tabs
+    # ══════════════════════════════════════════════════════════════════
+    tab_solve, tab_debug = st.tabs(["Solve Sudoku", "Preprocessing Debug"])
+
+    # ──────────────────────────────────────────────────────────────────
+    # TAB 1: SOLVE SUDOKU (full inference pipeline)
+    # ──────────────────────────────────────────────────────────────────
+    with tab_solve:
+        uploaded_file = st.file_uploader(
+            "Drag and drop your Sudoku image here", type=["jpg", "png", "jpeg"],
+            key="solve_upload")
+        if uploaded_file is not None and preprocess_dirty:
+            st.info("Preprocessing changes are pending. Press Apply in the sidebar before processing this image.")
+            uploaded_file = None
+
+        if uploaded_file is not None:
+            image_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+            img = cv2.imdecode(image_bytes, cv2.IMREAD_COLOR)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = resize_and_maintain_aspect_ratio(input_image=img, new_width=1000)
+
+            # ── Load model (deferred here so sidebar shows before upload) ──
+            if use_onnx and onnx_avail:
+                model        = OnnxInferenceSession(_onnx_candidate)
+                vision_model = model
+                _label = ("multi-task" if is_multitask else
+                          "unified-20" if is_unified else
+                          "Persian" if is_persian else "English")
+                st.sidebar.success(f"ONNX · {_label}")
+            elif is_unified:
+                _pt = UnifiedDigitCNN(backbone=unified_bb, pretrained=False,
+                                      num_classes=UNIFIED_NUM_CLASSES).to(device)
+                _pt.load_state_dict(torch.load(_paths['unified_pt'], map_location=device))
+                _pt.eval()
+                model        = _pt
+                vision_model = UnifiedDigitOnlyWrapper(_pt)
+                st.sidebar.info(f"PyTorch · unified-20 · {unified_bb}")
+            elif is_multitask:
+                _pt = MultiTaskDigitCNN(num_digit_classes=10, num_lang_classes=2).to(device)
+                _pt.load_state_dict(torch.load(_paths['mt_pt'], map_location=device))
+                _pt.eval()
+                model        = _pt
+                vision_model = DigitOnlyModelWrapper(_pt)
+                st.sidebar.info("PyTorch · multi-task")
+            elif is_persian and os.path.exists(_paths['persian_pt']):
+                model = DigitCNN(num_classes=10).to(device)
+                model.load_state_dict(torch.load(_paths['persian_pt'], map_location=device))
+                model.eval()
+                vision_model = model
+                st.sidebar.info("PyTorch · Persian (Hoda)")
             else:
-                _onnx_candidate = _paths['default_onnx']
-            onnx_avail = os.path.exists(_onnx_candidate)
-        except ImportError:
-            st.sidebar.caption("onnxruntime not installed — ONNX unavailable.")
-            _onnx_candidate = ''
+                _eng_pt = _paths['english_pt'] if os.path.exists(_paths['english_pt']) else _paths['default_pt']
+                if not os.path.exists(_eng_pt):
+                    st.error("No trained model found. Go to **Model Training** to train one.")
+                    st.stop()
+                model = DigitCNN(num_classes=10).to(device)
+                model.load_state_dict(torch.load(_eng_pt, map_location=device))
+                model.eval()
+                vision_model = model
+                st.sidebar.info("PyTorch · English (default)")
 
-        if onnx_avail:
-            use_onnx = st.sidebar.toggle("Use ONNX (faster ~2-5×)", value=True)
+            # ── Apply preprocessing ─────────────────────────────────────
+            img_original = img.copy()
+            if enable_sharpen:
+                img = sharpen_image(img, use_nlm=use_nlm, center=sharpen_center)
 
-        # ── Resolve flags ──────────────────────────────────────────────
-        is_multitask = use_multimodel and selected_mt_key == 'mt'
-        is_unified   = use_multimodel and selected_mt_key == 'unified'
-        is_persian   = use_persian and not use_multimodel
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("#### Original Image")
+                st.image(img_original, width='stretch')
 
-        # ── Load model ─────────────────────────────────────────────────
-        if use_onnx and onnx_avail:
-            model        = OnnxInferenceSession(_onnx_candidate)
-            vision_model = model
-            _label = ("multi-task" if is_multitask else
-                      "unified-20" if is_unified else
-                      "Persian" if is_persian else "English")
-            st.sidebar.success(f"ONNX · {_label}")
-
-        elif is_unified:
-            _pt = UnifiedDigitCNN(backbone=unified_bb, pretrained=False,
-                                  num_classes=UNIFIED_NUM_CLASSES).to(device)
-            _pt.load_state_dict(torch.load(_paths['unified_pt'], map_location=device))
-            _pt.eval()
-            model        = _pt
-            vision_model = UnifiedDigitOnlyWrapper(_pt)
-            st.sidebar.info(f"PyTorch · unified-20 · {unified_bb}")
-
-        elif is_multitask:
-            _pt = MultiTaskDigitCNN(num_digit_classes=10, num_lang_classes=2).to(device)
-            _pt.load_state_dict(torch.load(_paths['mt_pt'], map_location=device))
-            _pt.eval()
-            model        = _pt
-            vision_model = DigitOnlyModelWrapper(_pt)
-            st.sidebar.info("PyTorch · multi-task")
-
-        elif is_persian and os.path.exists(_paths['persian_pt']):
-            model = DigitCNN(num_classes=10).to(device)
-            model.load_state_dict(torch.load(_paths['persian_pt'], map_location=device))
-            model.eval()
-            vision_model = model
-            st.sidebar.info("PyTorch · Persian (Hoda)")
-
-        else:
-            # Default: English single-task model
-            _eng_pt = _paths['english_pt'] if os.path.exists(_paths['english_pt']) else _paths['default_pt']
-            if not os.path.exists(_eng_pt):
-                st.error("No trained model found. Go to **Model Training** to train one.")
-                st.stop()
-            model = DigitCNN(num_classes=10).to(device)
-            model.load_state_dict(torch.load(_eng_pt, map_location=device))
-            model.eval()
-            vision_model = model
-            st.sidebar.info("PyTorch · English (default)")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("#### Original Image")
-            st.image(img, width='stretch')
-
-        with st.spinner('Processing image and extracting grid...'):
-            try:
-                # --- Run both pipelines: Original vs A ---
-                cells_orig, M_orig, board_orig = None, None, None
-                cells_a, M_a, board_a = None, None, None
-                err_orig, err_a = None, None
-
+            with st.spinner('Processing image and extracting grid...'):
                 try:
-                    cells_orig, M_orig, board_orig = vision_orig_get_cells(img)
-                except Exception as e:
-                    err_orig = str(e)
+                    # --- Run vision extraction ---
+                    cells_orig, M_orig, board_orig = None, None, None
+                    err_orig = None
 
-                try:
-                    cells_a, M_a, board_a = vision_a.get_valid_cells_from_image(img)
-                except Exception as e:
-                    err_a = str(e)
+                    try:
+                        cells_orig, M_orig, board_orig = vision_orig_get_cells(
+                            img,
+                            grid_threshold_combos=active_grid_threshold_combos,
+                            cell_threshold_combos=DEFAULT_CELL_THRESHOLD_COMBOS,
+                            blur_k=blur_k,
+                            area_threshold=area_thresh,
+                            erode_enabled=erode_enabled,
+                            contour_erode_kernel_size=erode_kernel_size,
+                            contour_erode_iterations=erode_iterations,
+                            slice_erode_kernel_size=slice_erode_kernel_size,
+                            slice_erode_iterations=slice_erode_iterations,
+                            should_stop=lambda: raise_if_cancelled("inference"),
+                        )
+                    except RunCancelled:
+                        raise
+                    except Exception as e:
+                        err_orig = str(e)
 
-                if cells_orig is None and cells_a is None:
-                    raise Exception(
-                        f"Both pipelines failed.\nOriginal: {err_orig}\nA: {err_a}"
-                    )
-
-                # ── Pipeline comparison panel ──────────────────────────────────
-                with st.expander("Pipeline Comparison (Original vs A)", expanded=True):
-                    cmp_col_orig, cmp_col_a = st.columns(2)
-
-                    count_orig = sum(c['contains_digit'] for c in cells_orig) if cells_orig else -1
-                    count_a = sum(c['contains_digit'] for c in cells_a) if cells_a else -1
-
-                    with cmp_col_orig:
+                    if cells_orig is None:
+                        raise Exception(f"Grid extraction failed: {err_orig}")
+    
+                    # ── Grid extraction preview ────────────────────────────────────
+                    with st.expander("Grid Extraction Preview", expanded=True):
+                        count_orig = sum(c['contains_digit'] for c in cells_orig) if cells_orig else -1
+                        cells, M, board_image = cells_orig, M_orig, board_orig
+                        pipeline_name = "Original"
+    
                         st.markdown("**Original Pipeline**")
-                        if cells_orig is None:
-                            st.error(f"Failed: {err_orig}")
-                        else:
+                        gp_left, gp_right = st.columns(2)
+                        with gp_left:
                             st.image(board_orig, channels="GRAY",
                                      caption=f"Warped grid ({count_orig} digits detected)")
+                        with gp_right:
+                            st.caption(
+                                f"Grid combos: `{format_threshold_combos(active_grid_threshold_combos)}`  |  "
+                                f"Selected: `{selected_grid_combo_label}`  |  "
+                                f"Erode: `{'on' if erode_enabled else 'off'}`"
+                            )
                             fig_orig = plot_cell_images_in_grid(cells_orig)
                             st.pyplot(fig_orig)
                             plt.close(fig_orig)
-
-                    with cmp_col_a:
-                        st.markdown("**Pipeline A — Canny + Hough**")
-                        if cells_a is None:
-                            st.error(f"Failed: {err_a}")
+    
+                    # Save debug outputs for offline inspection
+                    debug_dir = save_debug_outputs(
+                        image_name=uploaded_file.name,
+                        img_rgb=img,
+                        cells_selected=cells, board_selected=board_image,
+                        pipeline_name=pipeline_name,
+                        error=err_orig,
+                    )
+                    st.sidebar.info(f"Debug outputs saved to `{debug_dir}`")
+    
+                    with st.expander("Intermediate Processing Steps (debug)", expanded=False):
+    
+                        # ── Step 0: Sharpening ───────────────────────────────────
+                        st.markdown("#### Step 0 — Sharpening")
+                        if enable_sharpen:
+                            _kern_str = f"[[0,-1,0],[-1,**{sharpen_center}**,-1],[0,-1,0]]"
+                            _mode_lbl = ("NLM denoising → " if use_nlm else "") + f"Laplacian {_kern_str}"
+                            st.caption(f"Mode: {_mode_lbl}")
                         else:
-                            st.image(board_a, channels="GRAY",
-                                     caption=f"Warped grid ({count_a} digits detected)")
-                            fig_a = plot_cell_images_in_grid(cells_a)
-                            st.pyplot(fig_a)
-                            plt.close(fig_a)
-
-                    options = []
-                    if cells_orig is not None:
-                        options.append(f"Original — {count_orig} digits")
-                    if cells_a is not None:
-                        options.append(f"Pipeline A (Canny+Hough) — {count_a} digits")
-
-                    default_idx = 0  # default to Original (currently better)
-                    pipeline_choice = st.radio(
-                        "Select pipeline to use for solving:",
-                        options,
-                        index=default_idx,
-                    )
-
-                # Resolve selection
-                if "Pipeline A" in pipeline_choice:
-                    cells, M, board_image = cells_a, M_a, board_a
-                else:
-                    cells, M, board_image = cells_orig, M_orig, board_orig
-
-                # Save debug outputs for offline inspection
-                debug_dir = save_debug_outputs(
-                    image_name=uploaded_file.name,
-                    img_rgb=img,
-                    cells_a=cells_a, board_a=board_a, err_a=err_a,
-                    cells_b=cells_orig, board_b=board_orig, err_b=err_orig,
-                    cells_selected=cells, board_selected=board_image,
-                    pipeline_choice=pipeline_choice,
-                )
-                st.sidebar.info(f"🔬 Debug outputs saved to `{debug_dir}`")
-
-                with st.expander("View Intermediate Processing Steps", expanded=False):
-                    step_col1, step_col2, step_col3 = st.columns(3)
-                    thresh = apply_grayscale_blur_and_threshold(img, blocksize=41, c=8)
-                    with step_col1:
-                        st.markdown("**1. Adaptive Thresholding**")
-                        st.image(thresh, width='stretch', channels="GRAY")
-                    with step_col2:
-                        st.markdown("**2. Perspective Transform (selected)**")
-                        if board_image is not None:
-                            st.image(board_image, width='stretch', channels="GRAY")
-                    with step_col3:
-                        st.markdown("**3. Cell Extraction (selected)**")
-                        if cells is not None:
-                            fig = plot_cell_images_in_grid(cells)
-                            st.pyplot(fig)
-                            plt.close(fig)
-
-                # --- Per-cell Prediction Detail ---
-                per_cell = get_per_cell_predictions(
-                    model, cells, device,
-                    is_multitask=is_multitask,
-                    is_unified=is_unified,
-                )
-
-                with st.expander("🔍 Cell-by-Cell Extraction & Prediction Details", expanded=True):
-                    st.markdown(
-                        "Each cell shows its **extracted image**, whether a digit was **detected**, "
-                        "the **predicted digit**, and the model's **confidence score**. "
-                        "🟢 = high confidence (≥80%), 🟡 = medium (50–80%), 🔴 = low (<50%)."
-                    )
-                    st.markdown("---")
-
-                    COLS = 9
-                    grid_cols = st.columns(COLS)
-
-                    # Column headers
-                    for c in range(COLS):
-                        with grid_cols[c]:
-                            st.markdown(f"<div style='text-align:center;color:#888;font-size:11px;'>Col {c}</div>",
-                                        unsafe_allow_html=True)
-
-                    for row in range(9):
-                        grid_cols = st.columns(COLS)
-                        for col in range(COLS):
-                            idx = row * 9 + col
-                            cell = cells[idx]
-                            info = per_cell[idx]
-
-                            with grid_cols[col]:
-                                # Display cell image
-                                cell_img_display = cell['img']
-                                st.image(cell_img_display, width=60, channels="GRAY",
-                                         caption=None)
-
-                                if not info['has_digit']:
-                                    st.markdown(
-                                        "<div style='text-align:center;font-size:11px;color:#888;'>Empty</div>",
-                                        unsafe_allow_html=True)
-                                else:
-                                    label = info['label']
-                                    conf = info['confidence']
-                                    conf_pct = conf * 100
-
-                                    if conf_pct >= 80:
-                                        dot = "🟢"
-                                    elif conf_pct >= 50:
-                                        dot = "🟡"
-                                    else:
-                                        dot = "🔴"
-
-                                    lang_badge = ''
-                                    if is_multitask and info.get('lang_label') is not None:
-                                        ln = 'FA' if info['lang_label'] == 0 else 'EN'
-                                        lc = info['lang_confidence'] * 100
-                                        lang_badge = f"<div style='text-align:center;font-size:9px;color:#888;'>{ln} {lc:.0f}%</div>"
-                                    st.markdown(
-                                        f"<div style='text-align:center;font-size:13px;font-weight:bold;'>{dot} {label}</div>"
-                                        f"<div style='text-align:center;font-size:10px;color:#aaa;'>{conf_pct:.1f}%</div>"
-                                        f"{lang_badge}",
-                                        unsafe_allow_html=True)
-
-                        # Row separator every 3 rows
-                        if row in (2, 5):
-                            st.markdown("<hr style='border-color:#444;margin:4px 0;'>", unsafe_allow_html=True)
-
-                # --- Prediction & Solving ---
-                # vision_model always returns single digit logits tensor (ONNX or DigitOnlyWrapper)
-                grid_array = get_predicted_sudoku_grid_torch(vision_model, cells, device)
-                solver = SudokuSolver(board=copy.deepcopy(grid_array))
-                solved_board = solver.board if solver.solve() else None
-
-                # --- Save inference text report ---
-                os.makedirs('models', exist_ok=True)
-                inf_report_path = save_inference_report(
-                    image_name=uploaded_file.name,
-                    cells=cells,
-                    per_cell_info=per_cell,
-                    grid_array=grid_array,
-                    solved_board=solved_board,
-                    output_path=f'models/reports/inference_report_{uploaded_file.name}.txt',
-                )
-                st.sidebar.success(f"📄 Inference report saved to `{inf_report_path}`")
-
-                if solved_board is not None:
-                    final_image = generate_solution_image(
-                        full_image=img, board_image=board_image,
-                        cells_list=cells, solved_board_arr=solved_board, M_matrix=M
-                    )
-
-                    with col2:
-                        st.markdown("#### Solved Sudoku")
-                        st.image(final_image, width='stretch')
-                        st.success("Sudoku solved successfully!")
-
-                    st.markdown("### Digital Representation")
-                    matrix_df = pd.DataFrame(solved_board)
-                    st.dataframe(
-                        matrix_df.style.set_properties(**{'text-align': 'center', 'font-weight': 'bold'}),
-                        width='stretch'
-                    )
-
-                    # Inline download button for inference report
-                    with open(inf_report_path, 'r', encoding='utf-8') as f:
-                        st.download_button(
-                            label="⬇️ Download Inference Report (.txt)",
-                            data=f.read(),
-                            file_name='inference_report.txt',
-                            mime='text/plain',
+                            st.caption("Sharpening disabled — showing original.")
+                        sc0a, sc0b = st.columns(2)
+                        with sc0a:
+                            st.markdown("**Before**")
+                            st.image(img_original, width='stretch')
+                        with sc0b:
+                            st.markdown("**After**")
+                            st.image(img, width='stretch')
+    
+                        st.markdown("---")
+    
+                        # ── Step 1: Grayscale → Blur ─────────────────────────────
+                        st.markdown("#### Step 1 — Grayscale & Gaussian Blur")
+                        _gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img
+                        sc1a, sc1b = st.columns(2)
+                        with sc1a:
+                            st.markdown("**Grayscale**")
+                            st.image(_gray, width='stretch', channels="GRAY")
+                        with sc1b:
+                            if blur_k > 1:
+                                _blurred = cv2.GaussianBlur(_gray, (blur_k, blur_k), 0)
+                                st.markdown(f"**After `GaussianBlur(ksize={blur_k}×{blur_k})`**")
+                                st.image(_blurred, width='stretch', channels="GRAY")
+                            else:
+                                st.markdown("**No blur** (blur_k=1)")
+                                st.image(_gray, width='stretch', channels="GRAY")
+    
+                        st.markdown("---")
+    
+                        # ── Step 2a: Custom threshold preview ────────────────────
+                        st.markdown("#### Step 2a — Custom Threshold Preview  *(your sidebar parameters)*")
+                        st.caption(
+                            f"method=**{thresh_method}**  blocksize=**{thresh_bs}**  "
+                            f"C=**{thresh_c}**  blur_k=**{blur_k}**"
                         )
+                        _t_custom = apply_grayscale_blur_and_threshold(
+                            img, method=thresh_method, blocksize=thresh_bs, c=thresh_c, blur_k=blur_k)
+                        sc2a, sc2b = st.columns(2)
+                        with sc2a:
+                            st.image(_t_custom, width='stretch', channels="GRAY")
+                        with sc2b:
+                            st.caption(
+                                f"Selected grid combo: `{selected_grid_combo_label}`  |  "
+                                f"Mode: `{grid_combo_mode}`"
+                            )
+    
+                        # ── Step 2b: All auto-tried combos ───────────────────────
+                        st.markdown("#### Step 2b — All Threshold Combos Tried  *(grid detection auto-loop)*")
+                        st.caption(
+                            f"Combos: `{format_threshold_combos(grid_threshold_combos)}`  |  "
+                            f"Selected: `{selected_grid_combo_label}`  |  Mode: `{grid_combo_mode}`"
+                        )
+                        for _idx in range(0, len(grid_threshold_combos), 2):
+                            _cols = st.columns(2)
+                            for _offset, (_col, (_bs, _c)) in enumerate(
+                                zip(_cols, grid_threshold_combos[_idx:_idx + 2])
+                            ):
+                                _t = apply_grayscale_blur_and_threshold(
+                                    img, blocksize=_bs, c=_c, blur_k=blur_k)
+                                with _col:
+                                    _is_selected = (_bs, _c) == selected_grid_combo
+                                    _label = threshold_combo_label(_idx + _offset, (_bs, _c))
+                                    st.markdown(f"**{'Selected - ' if _is_selected else ''}{_label}**")
+                                    st.image(_t, width='stretch', channels="GRAY")
+    
+                        st.markdown("---")
+    
+                        # ── Step 3: Perspective warp ─────────────────────────────
+                        st.markdown("#### Step 3 — Perspective Transform (selected pipeline)")
+                        if board_image is not None:
+                            h_b, w_b = board_image.shape[:2]
+                            sc3a, sc3b = st.columns(2)
+                            with sc3a:
+                                st.caption(f"Warped size: {w_b}×{h_b} px  |  Pipeline: `{pipeline_name}`")
+                                st.image(board_image, width='stretch',
+                                         channels="GRAY" if len(board_image.shape) == 2 else "RGB")
+                            with sc3b:
+                                st.caption(
+                                    f"Grid mode: `{grid_combo_mode}`  \n"
+                                    f"Selected grid combo: `{selected_grid_combo_label}`  \n"
+                                    f"Active combos: `{format_threshold_combos(active_grid_threshold_combos)}`"
+                                )
+                        else:
+                            st.warning("No warped grid available.")
+    
+                        st.markdown("---")
+    
+                        # ── Step 4: Cell extraction ──────────────────────────────
+                        st.markdown("#### Step 4 — Cell Extraction")
+                        if cells is not None:
+                            _nd = sum(c['contains_digit'] for c in cells)
+                            _nc = len(cells)
+                            sc4a, sc4b = st.columns(2)
+                            with sc4a:
+                                st.caption(
+                                    f"Cells: **{_nc}/81**  |  Digits: **{_nd}**  |  "
+                                    f"Empty: **{_nc - _nd}**  |  "
+                                    f"area_threshold used: **{area_thresh}%**  \n"
+                                    f"Cell loop: `{format_threshold_combos(DEFAULT_CELL_THRESHOLD_COMBOS)}`  \n"
+                                    f"Erode: `{'on' if erode_enabled else 'off'}`  |  "
+                                    f"contour `{erode_kernel_size}x{erode_kernel_size} x{erode_iterations}`  |  "
+                                    f"slice `{slice_erode_kernel_size}x{slice_erode_kernel_size} x{slice_erode_iterations}`"
+                                )
+                            with sc4b:
+                                _fig = plot_cell_images_in_grid(cells)
+                                st.pyplot(_fig)
+                                plt.close(_fig)
+                        else:
+                            st.warning("No cells extracted.")
+    
+                    # --- Per-cell Prediction Detail ---
+                    per_cell = get_per_cell_predictions(
+                        model, cells, device,
+                        is_multitask=is_multitask,
+                        is_unified=is_unified,
+                    )
+    
+                    with st.expander("Cell-by-Cell Extraction & Prediction Details", expanded=True):
+                        st.markdown(
+                            "Each cell shows its **extracted image**, whether a digit was **detected**, "
+                            "the **predicted digit**, and the model's **confidence score**. "
+                            "Confidence bands: high (>=80%), medium (50-80%), low (<50%)."
+                        )
+                        st.markdown("---")
+    
+                        COLS = 9
+                        grid_cols = st.columns(COLS)
+    
+                        # Column headers
+                        for c in range(COLS):
+                            with grid_cols[c]:
+                                st.markdown(f"<div style='text-align:center;color:#888;font-size:11px;'>Col {c}</div>",
+                                            unsafe_allow_html=True)
+    
+                        for row in range(9):
+                            grid_cols = st.columns(COLS)
+                            for col in range(COLS):
+                                idx = row * 9 + col
+                                cell = cells[idx]
+                                info = per_cell[idx]
+    
+                                with grid_cols[col]:
+                                    # Display cell image
+                                    cell_img_display = cell['img']
+                                    st.image(cell_img_display, width=60, channels="GRAY",
+                                             caption=None)
+    
+                                    if not info['has_digit']:
+                                        st.markdown(
+                                            "<div style='text-align:center;font-size:11px;color:#888;'>Empty</div>",
+                                            unsafe_allow_html=True)
+                                    else:
+                                        label = info['label']
+                                        conf = info['confidence']
+                                        conf_pct = conf * 100
+    
+                                        if conf_pct >= 80:
+                                            confidence_band = "High"
+                                        elif conf_pct >= 50:
+                                            confidence_band = "Medium"
+                                        else:
+                                            confidence_band = "Low"
+    
+                                        lang_badge = ''
+                                        if is_multitask and info.get('lang_label') is not None:
+                                            ln = 'FA' if info['lang_label'] == 0 else 'EN'
+                                            lc = info['lang_confidence'] * 100
+                                            lang_badge = f"<div style='text-align:center;font-size:9px;color:#888;'>{ln} {lc:.0f}%</div>"
+                                        st.markdown(
+                                            f"<div style='text-align:center;font-size:13px;font-weight:bold;'>{label}</div>"
+                                            f"<div style='text-align:center;font-size:10px;color:#aaa;'>{conf_pct:.1f}%</div>"
+                                            f"<div style='text-align:center;font-size:9px;color:#888;'>{confidence_band}</div>"
+                                            f"{lang_badge}",
+                                            unsafe_allow_html=True)
+    
+                            # Row separator every 3 rows
+                            if row in (2, 5):
+                                st.markdown("<hr style='border-color:#444;margin:4px 0;'>", unsafe_allow_html=True)
+    
+                    # --- Prediction & Solving ---
+                    # vision_model always returns single digit logits tensor (ONNX or DigitOnlyWrapper)
+                    grid_array = get_predicted_sudoku_grid_torch(
+                        vision_model, cells, device,
+                        should_stop=lambda: raise_if_cancelled("inference"))
+                    solver = SudokuSolver(board=copy.deepcopy(grid_array))
+                    solved_board = solver.board if solver.solve() else None
+    
+                    # --- Save inference text report ---
+                    os.makedirs('models', exist_ok=True)
+                    inf_report_path = save_inference_report(
+                        image_name=uploaded_file.name,
+                        cells=cells,
+                        per_cell_info=per_cell,
+                        grid_array=grid_array,
+                        solved_board=solved_board,
+                        output_path=f'models/reports/inference_report_{uploaded_file.name}.txt',
+                    )
+                    st.sidebar.success(f"Inference report saved to `{inf_report_path}`")
+    
+                    if solved_board is not None:
+                        final_image = generate_solution_image(
+                            full_image=img, board_image=board_image,
+                            cells_list=cells, solved_board_arr=solved_board, M_matrix=M
+                        )
+    
+                        with col2:
+                            st.markdown("#### Solved Sudoku")
+                            st.image(final_image, width='stretch')
+                            st.success("Sudoku solved successfully!")
+    
+                        st.markdown("### Digital Representation")
+                        matrix_df = pd.DataFrame(solved_board)
+                        st.dataframe(
+                            matrix_df.style.set_properties(**{'text-align': 'center', 'font-weight': 'bold'}),
+                            width='stretch'
+                        )
+    
+                        # Inline download button for inference report
+                        with open(inf_report_path, 'r', encoding='utf-8') as f:
+                            st.download_button(
+                                label="Download Inference Report (.txt)",
+                                data=f.read(),
+                                file_name='inference_report.txt',
+                                mime='text/plain',
+                            )
+                    else:
+                        st.error("The extracted grid is invalid or unsolvable. Please ensure the image is clear and well-lit.")
+                        st.markdown("**Extracted Grid (before solving):**")
+                        st.dataframe(pd.DataFrame(grid_array), width='stretch')
+    
+                except RunCancelled as e:
+                    st.warning(str(e))
+                    clear_cancel("inference")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception as e:
+                    import traceback
+                    st.error(f"Computer Vision Pipeline Error: {e}")
+                    st.code(traceback.format_exc())
+    
+        # ──────────────────────────────────────────────────────────────────
+        # TAB 2: PREPROCESSING DEBUG  (no model, no prediction, no solve)
+        # ──────────────────────────────────────────────────────────────────
+        with tab_debug:
+            st.markdown(
+                "Upload an image to inspect every preprocessing step using your sidebar parameters.  \n"
+                "**No digit prediction or Sudoku solving is performed here.**"
+            )
+            debug_file = st.file_uploader(
+                "Drop a Sudoku image to debug", type=["jpg", "png", "jpeg"],
+                key="debug_upload")
+            if debug_file is not None and preprocess_dirty:
+                st.info("Preprocessing changes are pending. Press Apply in the sidebar before running debug.")
+                debug_file = None
+    
+            if debug_file is not None:
+                _dbg_bytes = np.asarray(bytearray(debug_file.read()), dtype=np.uint8)
+                img_dbg = cv2.imdecode(_dbg_bytes, cv2.IMREAD_COLOR)
+                img_dbg = cv2.cvtColor(img_dbg, cv2.COLOR_BGR2RGB)
+                img_dbg = resize_and_maintain_aspect_ratio(input_image=img_dbg, new_width=1000)
+                img_dbg_orig = img_dbg.copy()
+                if enable_sharpen:
+                    img_dbg = sharpen_image(img_dbg, use_nlm=use_nlm, center=sharpen_center)
+    
+                # ── Step 0: Sharpening ───────────────────────────────────────
+                st.markdown("#### Step 0 — Sharpening")
+                if enable_sharpen:
+                    _kern = f"[[0,-1,0],[-1,{sharpen_center},-1],[0,-1,0]]"
+                    st.caption(("NLM → " if use_nlm else "") + f"Laplacian {_kern}")
                 else:
-                    st.error("The extracted grid is invalid or unsolvable. Please ensure the image is clear and well-lit.")
-                    st.markdown("**Extracted Grid (before solving):**")
-                    st.dataframe(pd.DataFrame(grid_array), width='stretch')
+                    st.caption("Sharpening disabled.")
+                _d0a, _d0b = st.columns(2)
+                with _d0a:
+                    st.markdown("**Before**"); st.image(img_dbg_orig, width='stretch')
+                with _d0b:
+                    st.markdown("**After**"); st.image(img_dbg, width='stretch')
+    
+                st.markdown("---")
+    
+                # ── Step 1: Grayscale + Blur ─────────────────────────────────
+                st.markdown("#### Step 1 — Grayscale & Gaussian Blur")
+                _dbg_gray = cv2.cvtColor(img_dbg, cv2.COLOR_RGB2GRAY) if len(img_dbg.shape) == 3 else img_dbg
+                _d1a, _d1b = st.columns(2)
+                with _d1a:
+                    st.markdown("**Grayscale**"); st.image(_dbg_gray, width='stretch', channels="GRAY")
+                with _d1b:
+                    if blur_k > 1:
+                        _dbg_blurred = cv2.GaussianBlur(_dbg_gray, (blur_k, blur_k), 0)
+                        st.markdown(f"**GaussianBlur(ksize={blur_k}×{blur_k})**")
+                        st.image(_dbg_blurred, width='stretch', channels="GRAY")
+                    else:
+                        st.markdown("**No blur** (blur_k=1)")
+                        st.image(_dbg_gray, width='stretch', channels="GRAY")
+    
+                st.markdown("---")
+    
+                # ── Step 2a: Custom threshold preview ────────────────────────
+                st.markdown("#### Step 2a — Custom Threshold  *(your sidebar params)*")
+                st.caption(f"method=**{thresh_method}**  blocksize=**{thresh_bs}**  C=**{thresh_c}**  blur_k=**{blur_k}**")
+                _dbg_t_custom = apply_grayscale_blur_and_threshold(
+                    img_dbg, method=thresh_method, blocksize=thresh_bs, c=thresh_c, blur_k=blur_k)
+                _d2a, _d2b = st.columns(2)
+                with _d2a:
+                    st.image(_dbg_t_custom, width='stretch', channels="GRAY")
+                with _d2b:
+                    st.caption(
+                        f"Selected grid combo: `{selected_grid_combo_label}`  |  "
+                        f"Mode: `{grid_combo_mode}`"
+                    )
+    
+                # ── Step 2b: Auto-loop combos ────────────────────────────────
+                st.markdown("#### Step 2b — All Auto-Tried Threshold Combos  *(grid detection loop)*")
+                st.caption(
+                    f"Combos: `{format_threshold_combos(grid_threshold_combos)}`  |  "
+                    f"Selected: `{selected_grid_combo_label}`  |  Mode: `{grid_combo_mode}`"
+                )
+                for _idx in range(0, len(grid_threshold_combos), 2):
+                    _dbg_tcols = st.columns(2)
+                    for _offset, (_col, (_bs, _c)) in enumerate(
+                        zip(_dbg_tcols, grid_threshold_combos[_idx:_idx + 2])
+                    ):
+                        with _col:
+                            _is_selected = (_bs, _c) == selected_grid_combo
+                            _label = threshold_combo_label(_idx + _offset, (_bs, _c))
+                            st.markdown(f"**{'Selected - ' if _is_selected else ''}{_label}**")
+                            st.image(
+                                apply_grayscale_blur_and_threshold(
+                                    img_dbg, blocksize=_bs, c=_c, blur_k=blur_k),
+                                width='stretch', channels="GRAY")
+    
+                st.markdown("---")
+    
+                # ── Step 3 + 4: Run grid extraction for warp + cells ─────
+                st.markdown("#### Step 3 — Perspective Transform  &  Step 4 — Cell Extraction")
+                with st.spinner("Running grid detection (no prediction)…"):
+                    try:
+                        try:
+                            _dbg_cells, _dbg_M, _dbg_board = vision_orig_get_cells(
+                                img_dbg,
+                                grid_threshold_combos=active_grid_threshold_combos,
+                                cell_threshold_combos=DEFAULT_CELL_THRESHOLD_COMBOS,
+                                blur_k=blur_k,
+                                area_threshold=area_thresh,
+                                erode_enabled=erode_enabled,
+                                contour_erode_kernel_size=erode_kernel_size,
+                                contour_erode_iterations=erode_iterations,
+                                slice_erode_kernel_size=slice_erode_kernel_size,
+                                slice_erode_iterations=slice_erode_iterations,
+                                should_stop=lambda: raise_if_cancelled("inference"),
+                            )
+                        except RunCancelled:
+                            raise
+                        except Exception as _e:
+                            raise Exception(f"Grid extraction failed: {_e}")
 
-            except Exception as e:
-                import traceback
-                st.error(f"Computer Vision Pipeline Error: {e}")
-                st.code(traceback.format_exc())
-
-
+                        st.markdown("**Original pipeline**")
+                        _w3a, _w3b = st.columns(2)
+                        with _w3a:
+                            _h_b, _w_b = _dbg_board.shape[:2]
+                            st.caption(f"Warped: {_w_b}×{_h_b} px")
+                            st.image(_dbg_board, width='stretch',
+                                     channels="GRAY" if len(_dbg_board.shape) == 2 else "RGB")
+                        with _w3b:
+                            _nd = sum(c['contains_digit'] for c in _dbg_cells)
+                            st.caption(
+                                f"Cells: **{len(_dbg_cells)}/81** | "
+                                f"Digits: **{_nd}** | Empty: **{len(_dbg_cells)-_nd}** | "
+                                f"area_threshold: **{area_thresh}%**"
+                            )
+                            _dbg_fig = plot_cell_images_in_grid(_dbg_cells)
+                            st.pyplot(_dbg_fig)
+                            plt.close(_dbg_fig)
+                        st.markdown("---")
+                    except RunCancelled as _ex:
+                        st.warning(str(_ex))
+                        clear_cancel("inference")
+                    except Exception as _ex:
+                        import traceback as _tb
+                        st.error(f"Pipeline error: {_ex}")
+                        st.code(_tb.format_exc())
+    
+    
 # ==========================================
 # MODE 2: MODEL TRAINING (CNN)
 # ==========================================
 elif app_mode == "Model Training":
     st.markdown("### Model Training Dashboard")
     st.markdown("Configure hyperparameters and monitor the CNN training process in real-time.")
+    render_stop_button("training", "Stop training")
 
     param_col1, param_col2, param_col3 = st.columns(3)
     with param_col1:
@@ -865,6 +1409,7 @@ elif app_mode == "Model Training":
     )
 
     if st.button("Start Training Sequence", width='stretch'):
+        clear_cancel("training")
         if not os.path.exists(data_path):
             st.error(f"Dataset path `{data_path}` does not exist. Please verify the path.")
             st.stop()
@@ -917,8 +1462,13 @@ elif app_mode == "Model Training":
 
                 for epoch in range(int(epochs)):
                     status_text.markdown(f"**Epoch {epoch + 1}/{epochs}…**")
-                    t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-                    v_loss, v_acc = validate(model, val_loader, criterion, device)
+                    raise_if_cancelled("training")
+                    t_loss, t_acc = train_epoch(
+                        model, train_loader, criterion, optimizer, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
+                    v_loss, v_acc = validate(
+                        model, val_loader, criterion, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     scheduler.step(v_loss)
 
                     if v_loss < best_val_loss:
@@ -943,13 +1493,17 @@ elif app_mode == "Model Training":
                 st.markdown("---"); st.markdown("### Test Set Evaluation")
                 with st.spinner("Evaluating…"):
                     model.load_state_dict(torch.load(save_path, map_location=device))
-                    t_loss, t_acc = validate(model, test_loader, criterion, device)
+                    t_loss, t_acc = validate(
+                        model, test_loader, criterion, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     st.metric("20-class Test Accuracy", f"{t_acc:.2f}%",
                               delta=f"Loss: {t_loss:.4f}", delta_color="inverse")
 
                 st.markdown("---"); st.markdown("### Confusion Matrix (20 classes)")
                 with st.spinner("Computing…"):
-                    y_true_20, y_pred_20 = collect_predictions(model, test_loader, device)
+                    y_true_20, y_pred_20 = collect_predictions(
+                        model, test_loader, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     all_lbl20 = sorted(set(y_true_20) | set(y_pred_20))
                     # Label names: 0=Eng_empty, 1-9=Eng_d, 10=Per_empty, 11-19=Per_d
                     def _cls_name(c):
@@ -977,7 +1531,7 @@ elif app_mode == "Model Training":
                 )
                 st.success(f"Report saved to `{rpt}`")
                 with open(rpt, 'r', encoding='utf-8') as f:
-                    st.download_button("⬇️ Download Unified Report (.txt)",
+                    st.download_button("Download Unified Report (.txt)",
                                        f.read(), 'training_report_unified20.txt', 'text/plain')
 
             elif is_lang_specific:
@@ -1020,8 +1574,13 @@ elif app_mode == "Model Training":
 
                 for epoch in range(int(epochs)):
                     status_text.markdown(f"**Epoch {epoch + 1}/{epochs}…**")
-                    t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-                    v_loss, v_acc = validate(model, val_loader, criterion, device)
+                    raise_if_cancelled("training")
+                    t_loss, t_acc = train_epoch(
+                        model, train_loader, criterion, optimizer, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
+                    v_loss, v_acc = validate(
+                        model, val_loader, criterion, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     scheduler.step(v_loss)
 
                     if v_loss < best_val_loss:
@@ -1046,13 +1605,17 @@ elif app_mode == "Model Training":
                 st.markdown("---"); st.markdown("### Test Set Evaluation")
                 with st.spinner("Evaluating…"):
                     model.load_state_dict(torch.load(save_path, map_location=device))
-                    t_loss, t_acc = validate(model, test_loader, criterion, device)
+                    t_loss, t_acc = validate(
+                        model, test_loader, criterion, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     st.metric(label=f"{lang_label} Test Accuracy", value=f"{t_acc:.2f}%",
                               delta=f"Loss: {t_loss:.4f}", delta_color="inverse")
 
                 st.markdown("---"); st.markdown("### Confusion Matrix")
                 with st.spinner("Computing…"):
-                    y_true, y_pred = collect_predictions(model, test_loader, device)
+                    y_true, y_pred = collect_predictions(
+                        model, test_loader, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     all_labels  = sorted(set(y_true) | set(y_pred))
                     class_names = ["Empty" if l == 0 else str(l) for l in all_labels]
                     cm_fig = plot_confusion_matrix(y_true, y_pred, class_names)
@@ -1074,7 +1637,7 @@ elif app_mode == "Model Training":
                 )
                 st.success(f"Report saved to `{rpt}`")
                 with open(rpt, 'r', encoding='utf-8') as f:
-                    st.download_button(f"⬇️ Download {lang_label} Report (.txt)",
+                    st.download_button(f"Download {lang_label} Report (.txt)",
                                        f.read(), f'training_report_{lang_label.lower()}.txt', 'text/plain')
 
             elif enable_multitask:
@@ -1131,10 +1694,15 @@ elif app_mode == "Model Training":
                 for epoch in range(int(epochs)):
                     status_text.markdown(f"**Epoch {epoch + 1}/{epochs}…**")
 
+                    raise_if_cancelled("training")
                     t_loss, t_d_acc, t_l_acc, t_d_loss, t_l_loss = \
-                        train_epoch_multitask(model, train_loader, criterion, optimizer, device)
+                        train_epoch_multitask(
+                            model, train_loader, criterion, optimizer, device,
+                            should_stop=lambda: raise_if_cancelled("training"))
                     v_loss, v_d_acc, v_l_acc, v_d_loss, v_l_loss = \
-                        validate_multitask(model, val_loader, criterion, device)
+                        validate_multitask(
+                            model, val_loader, criterion, device,
+                            should_stop=lambda: raise_if_cancelled("training"))
                     scheduler.step(v_loss)
 
                     if v_loss < best_val_loss:
@@ -1193,7 +1761,9 @@ elif app_mode == "Model Training":
                 st.markdown("### Test Set Evaluation")
                 with st.spinner("Evaluating on test set…"):
                     model.load_state_dict(torch.load('models/best_model_multitask.pt', map_location=device))
-                    t_loss, t_d_acc, t_l_acc, _, _ = validate_multitask(model, test_loader, criterion, device)
+                    t_loss, t_d_acc, t_l_acc, _, _ = validate_multitask(
+                        model, test_loader, criterion, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     mc1, mc2, mc3 = st.columns(3)
                     mc1.metric("Digit Accuracy",    f"{t_d_acc:.2f}%")
                     mc2.metric("Language Accuracy", f"{t_l_acc:.2f}%")
@@ -1204,7 +1774,9 @@ elif app_mode == "Model Training":
                 st.markdown("### Confusion Matrices")
                 with st.spinner("Computing…"):
                     d_true, d_pred_lst, l_true, l_pred_lst = \
-                        collect_predictions_multitask(model, test_loader, device)
+                        collect_predictions_multitask(
+                            model, test_loader, device,
+                            should_stop=lambda: raise_if_cancelled("training"))
 
                     cm_col1, cm_col2 = st.columns(2)
                     with cm_col1:
@@ -1248,7 +1820,7 @@ elif app_mode == "Model Training":
                 )
                 st.success(f"Report saved to `{rpt_path}`")
                 with open(rpt_path, 'r', encoding='utf-8') as f:
-                    st.download_button("⬇️ Download Multi-Task Report (.txt)",
+                    st.download_button("Download Multi-Task Report (.txt)",
                                        f.read(), 'training_report_multitask.txt', 'text/plain')
 
             else:
@@ -1287,8 +1859,13 @@ elif app_mode == "Model Training":
                 for epoch in range(int(epochs)):
                     status_text.markdown(f"**Running Epoch {epoch + 1}/{epochs}...**")
 
-                    train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-                    val_loss, val_acc     = validate(model, val_loader, criterion, device)
+                    raise_if_cancelled("training")
+                    train_loss, train_acc = train_epoch(
+                        model, train_loader, criterion, optimizer, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
+                    val_loss, val_acc     = validate(
+                        model, val_loader, criterion, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     scheduler.step(val_loss)
 
                     if val_loss < best_val_loss:
@@ -1320,7 +1897,9 @@ elif app_mode == "Model Training":
                 st.markdown("### Test Set Evaluation")
                 with st.spinner("Evaluating on test set..."):
                     model.load_state_dict(torch.load('models/best_model.pt', map_location=device))
-                    test_loss, test_acc = validate(model, test_loader, criterion, device)
+                    test_loss, test_acc = validate(
+                        model, test_loader, criterion, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     st.metric(label="Final Test Accuracy", value=f"{test_acc:.2f}%",
                               delta=f"Loss: {test_loss:.4f}", delta_color="inverse")
 
@@ -1331,7 +1910,9 @@ elif app_mode == "Model Training":
                     "Off-diagonal = confusion pairs. Each cell shows count and row %."
                 )
                 with st.spinner("Computing confusion matrix on test set..."):
-                    y_true, y_pred = collect_predictions(model, test_loader, device)
+                    y_true, y_pred = collect_predictions(
+                        model, test_loader, device,
+                        should_stop=lambda: raise_if_cancelled("training"))
                     all_labels  = sorted(set(y_true) | set(y_pred))
                     class_names = ["Empty" if lbl == 0 else str(lbl) for lbl in all_labels]
                     cm_fig      = plot_confusion_matrix(y_true, y_pred, class_names)
@@ -1356,12 +1937,17 @@ elif app_mode == "Model Training":
                     best_val_loss=best_val_loss, model=model,
                     output_path='models/training_report.txt',
                 )
-                st.success(f"📄 Training report saved to `{train_report_path}`")
+                st.success(f"Training report saved to `{train_report_path}`")
                 with open(train_report_path, 'r', encoding='utf-8') as f:
-                    st.download_button(label="⬇️ Download Training Report (.txt)",
+                    st.download_button(label="Download Training Report (.txt)",
                                        data=f.read(), file_name='training_report.txt',
                                        mime='text/plain')
 
+        except RunCancelled as e:
+            st.warning(str(e))
+            clear_cancel("training")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         except Exception as e:
             import traceback
             st.error(f"Training Error: {e}")
@@ -1375,6 +1961,7 @@ elif app_mode == "Model Optimization":
 
     st.markdown("### Model Optimization & Benchmarking")
     st.markdown("Export a trained model to TorchScript + ONNX. Artifacts saved next to the source `.pt` file.")
+    render_stop_button("optimization", "Stop optimization")
 
     cpu_device = torch.device('cpu')
 
@@ -1404,7 +1991,10 @@ elif app_mode == "Model Optimization":
                                    ["mobilenet_v3_small", "shufflenet_v2_x0_5"])
 
         if st.button("Run Optimization & Benchmark"):
-            with st.spinner("Loading model and exporting…"):
+            clear_cancel("optimization")
+            try:
+                with st.spinner("Loading model and exporting…"):
+                    raise_if_cancelled("optimization")
                 if opt_type == "single":
                     base_model = DigitCNN(num_classes=10)
                     base_model.load_state_dict(torch.load(opt_pt_path, map_location=cpu_device))
@@ -1412,6 +2002,7 @@ elif app_mode == "Model Optimization":
                     results = run_optimization_and_benchmark(
                         base_model, opt_pt_path, cpu_device,
                         output_prefix=opt_prefix,
+                        should_stop=lambda: raise_if_cancelled("optimization"),
                     )
                     last_onnx_ms = results[-1].get("ms/cell", "N/A")
                     if last_onnx_ms == "N/A":
@@ -1435,6 +2026,7 @@ elif app_mode == "Model Optimization":
                     results, verif = run_optimization_and_benchmark_multitask(
                         base_model, opt_pt_path, cpu_device,
                         output_prefix=opt_prefix,
+                        should_stop=lambda: raise_if_cancelled("optimization"),
                     )
                     if verif.get('error'):
                         st.warning("onnxruntime not installed — ONNX benchmark skipped.")
@@ -1448,3 +2040,6 @@ elif app_mode == "Model Optimization":
                         f"**ONNX**: `onnxruntime.InferenceSession('{opt_prefix}.onnx')` "
                         f"— outputs: `digit_output`, `lang_output`"
                     )
+            except RunCancelled as e:
+                st.warning(str(e))
+                clear_cancel("optimization")

@@ -5,8 +5,14 @@ import torch
 import pandas as pd
 
 
+def _check_stop(should_stop):
+    if should_stop is not None:
+        should_stop()
+
+
 def run_optimization_and_benchmark(base_model, model_path, cpu_device,
-                                    output_prefix='models/best_model'):
+                                    output_prefix='models/best_model',
+                                    should_stop=None):
     """
     Export single-output model to TorchScript + ONNX and benchmark CPU inference.
     Artifacts written to {output_prefix}.ts and {output_prefix}.onnx.
@@ -20,9 +26,11 @@ def run_optimization_and_benchmark(base_model, model_path, cpu_device,
     # 1. PyTorch
     pt_size_mb = os.path.getsize(model_path) / (1024 * 1024)
     for _ in range(10):
+        _check_stop(should_stop)
         base_model(dummy)
     t0 = time.perf_counter()
     for _ in range(iters):
+        _check_stop(should_stop)
         base_model(dummy)
     pt_ms = (time.perf_counter() - t0) / iters * 1000
     results.append({"Format": "PyTorch (.pt)", "Size (MB)": f"{pt_size_mb:.3f}",
@@ -33,9 +41,11 @@ def run_optimization_and_benchmark(base_model, model_path, cpu_device,
     traced.save(ts_path)
     ts_size_mb = os.path.getsize(ts_path) / (1024 * 1024)
     for _ in range(10):
+        _check_stop(should_stop)
         traced(dummy)
     t0 = time.perf_counter()
     for _ in range(iters):
+        _check_stop(should_stop)
         traced(dummy)
     ts_ms = (time.perf_counter() - t0) / iters * 1000
     results.append({"Format": f"TorchScript ({os.path.basename(ts_path)})",
@@ -50,6 +60,7 @@ def run_optimization_and_benchmark(base_model, model_path, cpu_device,
         input_names=['input'], output_names=['output'],
         dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
     )
+    _check_stop(should_stop)
     onnx_size_mb = os.path.getsize(onnx_path) / (1024 * 1024)
 
     try:
@@ -57,9 +68,11 @@ def run_optimization_and_benchmark(base_model, model_path, cpu_device,
         sess      = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
         np_in     = dummy.cpu().numpy()
         for _ in range(10):
+            _check_stop(should_stop)
             sess.run(None, {'input': np_in})
         t0 = time.perf_counter()
         for _ in range(iters):
+            _check_stop(should_stop)
             sess.run(None, {'input': np_in})
         onnx_ms = (time.perf_counter() - t0) / iters * 1000
         results.append({"Format": f"ONNX ({os.path.basename(onnx_path)})",
@@ -74,7 +87,8 @@ def run_optimization_and_benchmark(base_model, model_path, cpu_device,
 
 
 def run_optimization_and_benchmark_multitask(base_model, model_path, cpu_device,
-                                              output_prefix='models/best_model_multitask'):
+                                              output_prefix='models/best_model_multitask',
+                                              should_stop=None):
     """TorchScript + ONNX export for dual-output models (MultiTaskDigitCNN or UnifiedDigitCNN).
     ONNX uses output_names=['digit_output','lang_output'].
     Verifies ONNX matches PyTorch on both heads before benchmarking.
@@ -90,9 +104,11 @@ def run_optimization_and_benchmark_multitask(base_model, model_path, cpu_device,
     # 1. PyTorch
     pt_size_mb = os.path.getsize(model_path) / (1024 * 1024)
     for _ in range(10):
+        _check_stop(should_stop)
         base_model(dummy)
     t0 = time.perf_counter()
     for _ in range(iters):
+        _check_stop(should_stop)
         base_model(dummy)
     pt_ms = (time.perf_counter() - t0) / iters * 1000
     results.append({"Format": "PyTorch (.pt)",
@@ -105,9 +121,11 @@ def run_optimization_and_benchmark_multitask(base_model, model_path, cpu_device,
     traced.save(ts_path)
     ts_size_mb = os.path.getsize(ts_path) / (1024 * 1024)
     for _ in range(10):
+        _check_stop(should_stop)
         traced(dummy)
     t0 = time.perf_counter()
     for _ in range(iters):
+        _check_stop(should_stop)
         traced(dummy)
     ts_ms = (time.perf_counter() - t0) / iters * 1000
     results.append({"Format": f"TorchScript ({os.path.basename(ts_path)})",
@@ -128,6 +146,7 @@ def run_optimization_and_benchmark_multitask(base_model, model_path, cpu_device,
             'lang_output':  {0: 'batch_size'},
         },
     )
+    _check_stop(should_stop)
     onnx_size_mb  = os.path.getsize(onnx_path) / (1024 * 1024)
     verification  = {"digit_match": False, "lang_match": False, "error": None}
 
@@ -142,9 +161,11 @@ def run_optimization_and_benchmark_multitask(base_model, model_path, cpu_device,
         verification.update({"digit_match": digit_ok, "lang_match": lang_ok})
 
         for _ in range(10):
+            _check_stop(should_stop)
             sess.run(None, {'input': np_input})
         t0 = time.perf_counter()
         for _ in range(iters):
+            _check_stop(should_stop)
             sess.run(None, {'input': np_input})
         onnx_ms = (time.perf_counter() - t0) / iters * 1000
         results.append({"Format": f"ONNX ({os.path.basename(onnx_path)})",
