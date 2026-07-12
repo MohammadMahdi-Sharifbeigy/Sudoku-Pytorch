@@ -136,23 +136,6 @@ def threshold_combos_to_frame(combos):
     )
 
 
-def parse_threshold_combo_frame(frame, fallback):
-    combos = []
-    try:
-        rows = frame.to_dict("records")
-    except AttributeError:
-        rows = []
-    for row in rows:
-        try:
-            blocksize = int(row.get("blocksize"))
-            c_val = int(row.get("C"))
-        except (TypeError, ValueError):
-            continue
-        if blocksize >= 3 and blocksize % 2 == 1 and c_val >= 0:
-            combos.append((blocksize, c_val))
-    return combos or list(fallback)
-
-
 PREPROCESS_DEFAULTS = {
     "enable_sharpen": True,
     "use_nlm": False,
@@ -699,38 +682,102 @@ if app_mode == "Inference (Solve)":
             help="Lower catches thin strokes like Persian ۱ (~3%).")
         st.markdown("---")
         st.markdown("**Grid Detection Combos**")
-        st.caption("Edit values directly. Add a row for another combo; clear a row to remove it.")
-        if st.button("Restore default combos", width="stretch"):
+        st.caption("Edit a row, then use that row's Update or Remove button. Changes stay draft-only until Apply.")
+        if st.button("Restore default combos", width="stretch", key="restore_grid_combos"):
             st.session_state.draft_grid_combo_text = format_threshold_combos(DEFAULT_GRID_THRESHOLD_COMBOS)
-            if "draft_grid_combo_table" in st.session_state:
-                del st.session_state["draft_grid_combo_table"]
             st.rerun()
-        draft_grid_threshold_source = parse_threshold_combos(
+        draft_grid_threshold_combos = parse_threshold_combos(
             st.session_state.draft_grid_combo_text, DEFAULT_GRID_THRESHOLD_COMBOS)
-        edited_grid_combo_frame = st.data_editor(
-            threshold_combos_to_frame(draft_grid_threshold_source),
-            key="draft_grid_combo_table",
-            hide_index=True,
-            num_rows="dynamic",
-            width="stretch",
-            column_config={
-                "blocksize": st.column_config.NumberColumn(
-                    "blocksize", min_value=3, step=2, help="Odd adaptive-threshold neighborhood size."),
-                "C": st.column_config.NumberColumn(
-                    "C", min_value=0, step=1, help="Constant subtracted from the local threshold."),
-            },
-        )
-        draft_grid_threshold_combos = parse_threshold_combo_frame(
-            edited_grid_combo_frame, DEFAULT_GRID_THRESHOLD_COMBOS)
-        st.session_state.draft_grid_combo_text = format_threshold_combos(draft_grid_threshold_combos)
         draft_grid_combo_labels = [
             threshold_combo_label(i, combo)
             for i, combo in enumerate(draft_grid_threshold_combos)
         ]
+        pending_combo_selection = st.session_state.pop("pending_grid_combo_selection", None)
+        if pending_combo_selection in draft_grid_combo_labels:
+            st.session_state.draft_selected_grid_combo = pending_combo_selection
         if st.session_state.draft_selected_grid_combo not in draft_grid_combo_labels:
             st.session_state.draft_selected_grid_combo = draft_grid_combo_labels[0]
+
+        for combo_idx, (combo_bs, combo_c) in enumerate(draft_grid_threshold_combos):
+            st.markdown(f"**Combo {combo_idx + 1}**")
+            row_input_cols = st.columns(2)
+            with row_input_cols[0]:
+                row_bs = st.number_input(
+                    f"Combo {combo_idx + 1} blocksize",
+                    min_value=3,
+                    max_value=301,
+                    value=int(combo_bs),
+                    step=2,
+                    key=f"grid_combo_bs_{combo_idx}_{combo_bs}_{combo_c}",
+                    help="Must be odd. Even values are rounded up when saved.")
+            with row_input_cols[1]:
+                row_c = st.number_input(
+                    f"Combo {combo_idx + 1} C",
+                    min_value=0,
+                    max_value=100,
+                    value=int(combo_c),
+                    step=1,
+                    key=f"grid_combo_c_{combo_idx}_{combo_bs}_{combo_c}")
+
+            row_bs = int(row_bs)
+            if row_bs % 2 == 0:
+                row_bs += 1
+            row_c = int(row_c)
+
+            row_action_cols = st.columns(2)
+            with row_action_cols[0]:
+                if st.button(f"Update combo {combo_idx + 1}", width="stretch", key=f"update_grid_combo_{combo_idx}"):
+                    draft_grid_threshold_combos[combo_idx] = (row_bs, row_c)
+                    st.session_state.draft_grid_combo_text = format_threshold_combos(draft_grid_threshold_combos)
+                    st.session_state.pending_grid_combo_selection = threshold_combo_label(
+                        combo_idx, draft_grid_threshold_combos[combo_idx])
+                    st.rerun()
+            with row_action_cols[1]:
+                if st.button(
+                    f"Remove combo {combo_idx + 1}",
+                    width="stretch",
+                    key=f"remove_grid_combo_{combo_idx}",
+                    disabled=len(draft_grid_threshold_combos) <= 1,
+                ):
+                    draft_grid_threshold_combos.pop(combo_idx)
+                    st.session_state.draft_grid_combo_text = format_threshold_combos(draft_grid_threshold_combos)
+                    new_idx = min(combo_idx, len(draft_grid_threshold_combos) - 1)
+                    st.session_state.pending_grid_combo_selection = threshold_combo_label(
+                        new_idx, draft_grid_threshold_combos[new_idx])
+                    st.rerun()
+
+        st.markdown("**Add New Combo**")
+        add_combo_cols = st.columns(2)
+        with add_combo_cols[0]:
+            new_combo_bs = st.number_input(
+                "New blocksize",
+                min_value=3,
+                max_value=301,
+                value=41,
+                step=2,
+                key="new_grid_combo_bs",
+                help="Must be odd. Even values are rounded up when saved.")
+        with add_combo_cols[1]:
+            new_combo_c = st.number_input(
+                "New C",
+                min_value=0,
+                max_value=100,
+                value=8,
+                step=1,
+                key="new_grid_combo_c")
+        new_combo_bs = int(new_combo_bs)
+        if new_combo_bs % 2 == 0:
+            new_combo_bs += 1
+        new_combo_c = int(new_combo_c)
+        if st.button("Add combo", width="stretch", key="add_grid_combo"):
+            draft_grid_threshold_combos.append((new_combo_bs, new_combo_c))
+            st.session_state.draft_grid_combo_text = format_threshold_combos(draft_grid_threshold_combos)
+            st.session_state.pending_grid_combo_selection = threshold_combo_label(
+                len(draft_grid_threshold_combos) - 1, draft_grid_threshold_combos[-1])
+            st.rerun()
+
         st.selectbox(
-            "Selected grid combo",
+            "Combo used by selected-only mode",
             draft_grid_combo_labels,
             key="draft_selected_grid_combo")
         st.radio(
