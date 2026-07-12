@@ -4,9 +4,97 @@ import cv2
 import struct
 import numpy as np
 import torch
-from torchvision import datasets
+from torchvision import datasets, transforms
 from sklearn.model_selection import train_test_split
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import Dataset, TensorDataset, DataLoader
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Normalisation stats (MNIST domain, grayscale [0,1] input)
+# ──────────────────────────────────────────────────────────────────────────────
+MNIST_MEAN = 0.1307
+MNIST_STD  = 0.3081
+
+# Training augmentation pipeline for 28×28 grayscale tensors [1,H,W] in [0,1].
+# ToPILImage → spatial augmentations → ToTensor → Normalize → RandomErasing
+TRAIN_TRANSFORM = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.RandomAffine(
+        degrees=8,
+        translate=(0.08, 0.08),
+        scale=(0.88, 1.12),
+        shear=6,
+    ),
+    transforms.RandomPerspective(distortion_scale=0.18, p=0.35),
+    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5)),
+    transforms.RandomAdjustSharpness(sharpness_factor=2.0, p=0.3),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[MNIST_MEAN], std=[MNIST_STD]),
+    transforms.RandomErasing(p=0.25, scale=(0.02, 0.12), ratio=(0.3, 3.3), value=0),
+])
+
+# Evaluation transform: normalise only, no augmentation.
+EVAL_TRANSFORM = transforms.Normalize(mean=[MNIST_MEAN], std=[MNIST_STD])
+
+
+class AugmentedDataset(Dataset):
+    """Wraps pre-computed (x, y) tensors and applies on-the-fly augmentation.
+
+    x: float32 tensor shape (N, 1, H, W) in range [0, 1]
+    y: long tensor shape (N,)
+    transform: TRAIN_TRANSFORM for train, EVAL_TRANSFORM for val/test.
+    """
+
+    def __init__(self, x: torch.Tensor, y: torch.Tensor, transform=None):
+        self.x         = x
+        self.y         = y
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.x)
+
+    def __getitem__(self, idx: int):
+        img = self.x[idx]   # [1, H, W] float32 in [0, 1]
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.y[idx]
+
+
+class MultitaskAugmentedDataset(Dataset):
+    """Three-output variant for multi-task loaders (x, digit_y, lang_y)."""
+
+    def __init__(self, x: torch.Tensor, digit_y: torch.Tensor,
+                 lang_y: torch.Tensor, transform=None):
+        self.x         = x
+        self.digit_y   = digit_y
+        self.lang_y    = lang_y
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.x)
+
+    def __getitem__(self, idx: int):
+        img = self.x[idx]
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, self.digit_y[idx], self.lang_y[idx]
+
+
+def _make_loader(ds: Dataset, batch_size: int, shuffle: bool) -> DataLoader:
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                      num_workers=2, pin_memory=torch.cuda.is_available())
+
+
+def _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test,
+                  batch_size: int) -> tuple:
+    """Wrap three splits into DataLoaders with augmentation on the train split."""
+    train_ds = AugmentedDataset(x_train, y_train, transform=TRAIN_TRANSFORM)
+    val_ds   = AugmentedDataset(x_val,   y_val,   transform=EVAL_TRANSFORM)
+    test_ds  = AugmentedDataset(x_test,  y_test,  transform=EVAL_TRANSFORM)
+    return (
+        _make_loader(train_ds, batch_size, shuffle=True),
+        _make_loader(val_ds,   batch_size, shuffle=False),
+        _make_loader(test_ds,  batch_size, shuffle=False),
+    )
 
 # ==========================================
 # 1. Hoda Dataset Reader Functions
@@ -254,10 +342,7 @@ def get_dataloaders(data_path, batch_size=128):
     y_val = torch.cat([y_v_f, y_v_m, y_v_e], dim=0)
     y_test = torch.cat([y_te_f, y_te_m, y_te_e], dim=0)
     
-    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(TensorDataset(x_val, y_val), batch_size=batch_size, shuffle=False, num_workers=2)
-    test_loader = DataLoader(TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False, num_workers=2)
-    return train_loader, val_loader, test_loader
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
 
 def get_dataloaders_mnist_hoda(data_path, batch_size=128):
     """Loader 2: MNIST + Hoda + Empty Cells"""
@@ -282,10 +367,7 @@ def get_dataloaders_mnist_hoda(data_path, batch_size=128):
     y_val = torch.cat(y_val_list, dim=0)
     y_test = torch.cat(y_test_list, dim=0)
     
-    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(TensorDataset(x_val, y_val), batch_size=batch_size, shuffle=False, num_workers=2)
-    test_loader = DataLoader(TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False, num_workers=2)
-    return train_loader, val_loader, test_loader
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
 
 def get_dataloaders_mnist_only(batch_size=128):
     """Loader 4: MNIST + Empty Cells only (no Fonts, no Hoda)."""
@@ -300,10 +382,7 @@ def get_dataloaders_mnist_only(batch_size=128):
     y_val   = torch.cat([y_v_m,  y_v_e],  dim=0)
     y_test  = torch.cat([y_te_m, y_te_e], dim=0)
 
-    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True,  num_workers=2)
-    val_loader   = DataLoader(TensorDataset(x_val,   y_val),   batch_size=batch_size, shuffle=False, num_workers=2)
-    test_loader  = DataLoader(TensorDataset(x_test,  y_test),  batch_size=batch_size, shuffle=False, num_workers=2)
-    return train_loader, val_loader, test_loader
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
 
 def get_dataloaders_all(data_path, batch_size=128):
     """Loader 3: MNIST + Fonts + Hoda + Empty Cells"""
@@ -332,10 +411,7 @@ def get_dataloaders_all(data_path, batch_size=128):
     y_val = torch.cat(y_val_list, dim=0)
     y_test = torch.cat(y_test_list, dim=0)
 
-    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(TensorDataset(x_val, y_val), batch_size=batch_size, shuffle=False, num_workers=2)
-    test_loader = DataLoader(TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False, num_workers=2)
-    return train_loader, val_loader, test_loader
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
 
 
 def get_dataloaders_unified20(data_path, batch_size=128):
@@ -390,10 +466,7 @@ def get_dataloaders_unified20(data_path, batch_size=128):
     assert y_train.max() <= 19 and y_train.min() >= 0, \
         f"Unified label out of range: min={y_train.min()} max={y_train.max()}"
 
-    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True,  num_workers=2)
-    val_loader   = DataLoader(TensorDataset(x_val,   y_val),   batch_size=batch_size, shuffle=False, num_workers=2)
-    test_loader  = DataLoader(TensorDataset(x_test,  y_test),  batch_size=batch_size, shuffle=False, num_workers=2)
-    return train_loader, val_loader, test_loader
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
 
 
 def get_dataloaders_persian(data_path, batch_size=128):
@@ -414,10 +487,7 @@ def get_dataloaders_persian(data_path, batch_size=128):
     y_val   = torch.cat([y_v_h,  y_v_e],  dim=0)
     y_test  = torch.cat([y_te_h, y_te_e], dim=0)
 
-    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True,  num_workers=2)
-    val_loader   = DataLoader(TensorDataset(x_val,   y_val),   batch_size=batch_size, shuffle=False, num_workers=2)
-    test_loader  = DataLoader(TensorDataset(x_test,  y_test),  batch_size=batch_size, shuffle=False, num_workers=2)
-    return train_loader, val_loader, test_loader
+    return _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test, batch_size)
 
 
 def get_dataloaders_english(data_path, batch_size=128):
@@ -559,16 +629,17 @@ def get_dataloaders_multitask(data_path, batch_size=128):
     print(f"Lang class weights  Persian: {lang_class_weights[0]:.4f}  "
           f"English: {lang_class_weights[1]:.4f}")
 
-    train_loader = DataLoader(
-        TensorDataset(x_train, y_train, lt_train),
-        batch_size=batch_size, shuffle=True, num_workers=2,
+    pin = torch.cuda.is_available()
+    train_loader = _make_loader(
+        MultitaskAugmentedDataset(x_train, y_train, lt_train, transform=TRAIN_TRANSFORM),
+        batch_size, shuffle=True,
     )
-    val_loader = DataLoader(
-        TensorDataset(x_val, y_val, lt_val),
-        batch_size=batch_size, shuffle=False, num_workers=2,
+    val_loader = _make_loader(
+        MultitaskAugmentedDataset(x_val, y_val, lt_val, transform=EVAL_TRANSFORM),
+        batch_size, shuffle=False,
     )
-    test_loader = DataLoader(
-        TensorDataset(x_test, y_test, lt_test),
-        batch_size=batch_size, shuffle=False, num_workers=2,
+    test_loader = _make_loader(
+        MultitaskAugmentedDataset(x_test, y_test, lt_test, transform=EVAL_TRANSFORM),
+        batch_size, shuffle=False,
     )
     return train_loader, val_loader, test_loader, balance_info, lang_class_weights
