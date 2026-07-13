@@ -126,6 +126,76 @@ def build_train_transform(
 # Module-level default transform (no brightness/shadow) — kept for backward compat.
 TRAIN_TRANSFORM = build_train_transform()
 
+# ── Augmentation preset names ────────────────────────────────────────────────
+AUG_PRESETS = {
+    "none":  "No augmentation — original winning config",
+    "light": "Affine only, no blur/erasing — safe for small models",
+    "full":  "All transforms — current default",
+}
+
+EFFICIENTNET_MEAN = [0.485, 0.456, 0.406]
+EFFICIENTNET_STD  = [0.229, 0.224, 0.225]
+
+
+def build_train_transform_preset(preset: str = "full") -> transforms.Compose:
+    """Return a training transform by preset name.
+
+    preset options:
+        "none"  — no augmentation, just ToTensor + MNIST normalize
+        "light" — RandomAffine only, no blur or erasing
+        "full"  — full augmentation pipeline (current default)
+    """
+    if preset == "none":
+        return transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[MNIST_MEAN], std=[MNIST_STD]),
+        ])
+    if preset == "light":
+        return transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.RandomAffine(degrees=8, translate=(0.08, 0.08), scale=(0.88, 1.12), shear=6),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[MNIST_MEAN], std=[MNIST_STD]),
+        ])
+    # "full" — default
+    return build_train_transform()
+
+
+def build_efficientnet_transform(augment: bool = True) -> transforms.Compose:
+    """Transform pipeline for EfficientNetDigitCNN.
+
+    Resizes 28×28 → 224×224, converts 1-ch tensor to PIL RGB,
+    applies ImageNet normalisation.
+    augment=True adds mild affine + colour jitter suitable for 224×224.
+    """
+    steps = [
+        transforms.ToPILImage(),
+        transforms.Resize((224, 224)),
+        transforms.Grayscale(num_output_channels=3),
+    ]
+    if augment:
+        steps += [
+            transforms.RandomAffine(degrees=10, translate=(0.05, 0.05), scale=(0.90, 1.10), shear=5),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.RandomPerspective(distortion_scale=0.12, p=0.25),
+        ]
+    steps += [
+        transforms.ToTensor(),
+        transforms.Normalize(mean=EFFICIENTNET_MEAN, std=EFFICIENTNET_STD),
+    ]
+    return transforms.Compose(steps)
+
+
+def build_efficientnet_eval_transform() -> transforms.Compose:
+    return transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((224, 224)),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=EFFICIENTNET_MEAN, std=EFFICIENTNET_STD),
+    ])
+
 
 class AugmentedDataset(Dataset):
     """Wraps pre-computed (x, y) tensors and applies on-the-fly augmentation.
@@ -741,3 +811,48 @@ def get_dataloaders_multitask(data_path, batch_size=128, train_transform=None):
         batch_size, shuffle=False,
     )
     return train_loader, val_loader, test_loader, balance_info, lang_class_weights
+
+
+def get_dataloaders_efficientnet(
+    data_path: str,
+    dataset_mode: str = "all",
+    batch_size: int = 32,
+    aug_preset: str = "full",
+) -> tuple:
+    """DataLoaders for EfficientNetDigitCNN (224×224 RGB, ImageNet normalisation).
+
+    dataset_mode: "all" | "persian" | "english" | "mnist_only" | "mnist_fonts" | "mnist_hoda"
+    aug_preset:   "none" | "light" | "full"
+    Returns: (train_loader, val_loader, test_loader)
+    """
+    augment = aug_preset != "none"
+    train_tf = build_efficientnet_transform(augment=augment)
+    eval_tf  = build_efficientnet_eval_transform()
+
+    if dataset_mode == "persian":
+        base_train, base_val, base_test = get_dataloaders_persian(data_path, batch_size=batch_size)
+    elif dataset_mode == "english":
+        base_train, base_val, base_test = get_dataloaders_english(data_path, batch_size=batch_size)
+    elif dataset_mode == "mnist_only":
+        base_train, base_val, base_test = get_dataloaders_mnist_only(batch_size=batch_size)
+    elif dataset_mode == "mnist_fonts":
+        base_train, base_val, base_test = get_dataloaders(data_path, batch_size=batch_size)
+    elif dataset_mode == "mnist_hoda":
+        base_train, base_val, base_test = get_dataloaders_mnist_hoda(data_path, batch_size=batch_size)
+    else:  # "all"
+        base_train, base_val, base_test = get_dataloaders_all(data_path, batch_size=batch_size)
+
+    def _rewrap(loader, transform):
+        ds = loader.dataset
+        if hasattr(ds, 'x'):
+            new_ds = AugmentedDataset(ds.x, ds.y, transform=transform)
+        else:
+            new_ds = AugmentedDataset(ds.tensors[0], ds.tensors[1], transform=transform)
+        return DataLoader(new_ds, batch_size=batch_size, shuffle=(transform is train_tf),
+                          num_workers=0, pin_memory=False)
+
+    return (
+        _rewrap(base_train, train_tf),
+        _rewrap(base_val,   eval_tf),
+        _rewrap(base_test,  eval_tf),
+    )
