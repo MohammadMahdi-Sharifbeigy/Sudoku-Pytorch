@@ -264,3 +264,81 @@ class UnifiedDigitCNN(nn.Module):
         total     = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return total, trainable
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EfficientNet-B0 digit model (improved  approach)
+# ──────────────────────────────────────────────────────────────────────────────
+#   Input:  (B, 1, 28, 28)  grayscale — upsampled to 3-ch inside forward()
+#   Output: (B, num_classes) logits
+#
+#   Two-phase training:
+#     Phase 1 — head only, BN frozen  → call freeze_backbone()
+#     Phase 2 — last 3 feature blocks + head, BN still frozen → call unfreeze_last_blocks(n=3)
+#   BN stays frozen in both phases (correct for pretrained transfer learning).
+
+from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+
+
+class EfficientNetDigitCNN(nn.Module):
+    """EfficientNet-B0 adapted for grayscale 28×28 digit recognition.
+
+    Improvements over EfficientNet-B1:
+    - B0 (smaller, faster, easier to overfit-guard on small datasets)
+    - Grayscale upsampled to 3-ch inside forward() so pretrained conv1 weights apply
+    - Head: 1280 → 512 → Dropout(0.3) → 256 → Dropout(0.2) → num_classes
+    - freeze_backbone / unfreeze_last_blocks helpers for two-phase training
+    """
+
+    def __init__(self, num_classes: int = 10, pretrained: bool = True):
+        super().__init__()
+        weights = EfficientNet_B0_Weights.DEFAULT if pretrained else None
+        net = efficientnet_b0(weights=weights)
+
+        # Replace classifier head
+        net.classifier = nn.Sequential(
+            nn.Dropout(p=0.3, inplace=True),
+            nn.Linear(1280, 512),
+            nn.SiLU(inplace=True),
+            nn.Dropout(p=0.2, inplace=True),
+            nn.Linear(512, 256),
+            nn.SiLU(inplace=True),
+            nn.Dropout(p=0.1, inplace=True),
+            nn.Linear(256, num_classes),
+        )
+        self.net = net
+        self.num_classes = num_classes
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Upsample 1-ch grayscale → 3-ch so pretrained stem weights are used properly
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+        return self.net(x)
+
+    def freeze_backbone(self) -> None:
+        """Phase 1: freeze all feature layers, train head only. Freeze BN."""
+        for param in self.net.features.parameters():
+            param.requires_grad = False
+        for param in self.net.classifier.parameters():
+            param.requires_grad = True
+        self._freeze_batchnorm()
+
+    def unfreeze_last_blocks(self, n: int = 3) -> None:
+        """Phase 2: unfreeze last n feature blocks + head. BN stays frozen."""
+        blocks = list(self.net.features)
+        for block in blocks[-n:]:
+            for param in block.parameters():
+                param.requires_grad = True
+        self._freeze_batchnorm()
+
+    def _freeze_batchnorm(self) -> None:
+        for module in self.net.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                module.eval()
+                for param in module.parameters():
+                    param.requires_grad = False
+
+    def param_count(self):
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total, trainable
