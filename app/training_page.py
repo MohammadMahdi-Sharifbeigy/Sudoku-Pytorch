@@ -15,6 +15,7 @@ from src.model import (
     MultiTaskDigitCNN, MultiTaskFocalLoss,
     UnifiedDigitCNN, UNIFIED_NUM_CLASSES,
     decode_unified_class,
+    EfficientNetDigitCNN,
 )
 from src.data_utils import (
     get_dataloaders, get_dataloaders_all, get_dataloaders_mnist_hoda,
@@ -52,53 +53,105 @@ def render_training_page(device: torch.device) -> None:
     with opt_col1:
         weight_decay = st.number_input(
             "AdamW Weight Decay", value=1e-4, format="%.6f",
-            help="L2 regularisation via AdamW. 1e-4 is a safe default. "
-                 "Increase (1e-3) for stronger regularisation on small datasets. "
-                 "Set 0 to disable (equivalent to Adam).",
+            help="L2 regularisation. 1e-4 safe default.",
         )
     with opt_col2:
         lr_schedule = st.selectbox(
             "LR Schedule",
             ["ReduceLROnPlateau", "CosineAnnealing", "OneCycleLR"],
-            help="ReduceLROnPlateau: halves LR when val loss stagnates (safe default). "
-                 "CosineAnnealing: smooth decay, good for longer runs. "
-                 "OneCycleLR: aggressive warmup + decay, fastest convergence.",
+            help="ReduceLROnPlateau: halves LR on stagnation. CosineAnnealing: smooth decay. OneCycleLR: aggressive warmup.",
         )
 
-    data_path    = st.text_input("Dataset Directory Path", value="data")
-    dataset_mode = st.radio(
-        "Training Dataset",
-        [
-            "MNIST Only",
-            "MNIST + Fonts (Recommended for printed Sudoku)",
-            "MNIST + Hoda",
-            "MNIST + Fonts + Hoda (All)",
-            "Persian Only (Hoda — saves best_model_persian.pt)",
-            "English Only (MNIST + Fonts — saves best_model_english.pt)",
-            "Unified 20-Class (MNIST + Fonts + Hoda → saves best_model_unified20.pt)",
-        ],
-        index=1,
-    )
+    data_path = st.text_input("Dataset Directory Path", value="data")
 
-    if dataset_mode.startswith("Unified"):
-        unified_backbone = st.selectbox(
-            "Backbone", ["mobilenet_v3_small", "shufflenet_v2_x0_5"], index=0)
-        unified_pretrained = st.toggle(
-            "Use ImageNet pretrained weights", value=False,
-            help="Pretrained weights help backbone but NOT the 1-channel first conv.")
+    st.markdown("---")
+    st.markdown("#### Training Configuration")
+
+    sel_col1, sel_col2 = st.columns(2)
+    with sel_col1:
+        model_choice = st.selectbox(
+            "Model",
+            [
+                "DigitCNN",
+                "MultiTaskCNN",
+                "UnifiedCNN — MobileNetV3",
+                "UnifiedCNN — ShuffleNetV2",
+                "EfficientNetDigit",
+            ],
+            help=(
+                "DigitCNN: lightweight 3-block CNN (~250K params). "
+                "MultiTaskCNN: shared backbone + digit/language heads. "
+                "UnifiedCNN: 20-class unified digit+language. "
+                "EfficientNetDigit: transfer learning from ImageNet, strongest baseline."
+            ),
+        )
+    with sel_col2:
+        purpose = st.selectbox(
+            "Purpose",
+            ["English", "Persian", "Multi"],
+            help="English: MNIST/fonts. Persian: Hoda. Multi: both scripts together.",
+        )
+
+    sel_col3, sel_col4 = st.columns(2)
+    with sel_col3:
+        if purpose == "English":
+            dataset_options = ["MNIST Only", "MNIST + Fonts", "MNIST + Fonts + Hoda (All)"]
+            dataset_default = 1
+        elif purpose == "Persian":
+            dataset_options = ["Persian Only (Hoda)", "MNIST + Fonts + Hoda (All)"]
+            dataset_default = 0
+        else:  # Multi
+            dataset_options = ["MNIST + Fonts + Hoda (All)", "MNIST + Hoda"]
+            dataset_default = 0
+        dataset_choice = st.selectbox("Dataset", dataset_options, index=dataset_default)
+
+    with sel_col4:
+        aug_choice = st.selectbox(
+            "Augmentation",
+            ["full", "light", "none"],
+            index=0,
+            help=(
+                "none: no geometric distortion — best for 28×28 odd digits (1,3,5,7,9). "
+                "light: affine only. "
+                "full: all transforms (recommended for EfficientNet at 224×224)."
+            ),
+        )
+
+    # Multi-script sub-option
+    if purpose == "Multi" and model_choice not in ("MultiTaskCNN",):
+        multi_mode = st.radio(
+            "Multi-script mode",
+            ["Unified model (20-class)", "Separate models (Persian + English)"],
+            horizontal=True,
+        )
     else:
-        unified_backbone   = "mobilenet_v3_small"
+        multi_mode = None
+
+    # EfficientNet-specific controls
+    if model_choice == "EfficientNetDigit":
+        eff_pretrained = st.toggle(
+            "Use ImageNet pretrained weights", value=True,
+            help="Strongly recommended — core advantage of EfficientNet.",
+        )
+        eff_col1, eff_col2 = st.columns(2)
+        with eff_col1:
+            eff_phase1_epochs = st.number_input("Phase 1 epochs (head only)", min_value=1, max_value=30, value=6)
+        with eff_col2:
+            eff_phase2_epochs = st.number_input("Phase 2 epochs (fine-tune)", min_value=1, max_value=50, value=14)
+    else:
+        eff_pretrained = True
+        eff_phase1_epochs = 6
+        eff_phase2_epochs = 14
+
+    # UnifiedCNN backbone selector
+    if model_choice in ("UnifiedCNN — MobileNetV3", "UnifiedCNN — ShuffleNetV2"):
+        unified_backbone = "mobilenet_v3_small" if "MobileNet" in model_choice else "shufflenet_v2_x0_5"
+        unified_pretrained = st.toggle("Use ImageNet pretrained weights", value=False)
+    else:
+        unified_backbone = "mobilenet_v3_small"
         unified_pretrained = False
 
-    enable_multitask = st.toggle(
-        "Enable language classification (multi-task)", value=False,
-        help=(
-            "Trains MultiTaskDigitCNN with a second head for Persian/English detection. "
-            "Uses MNIST + Fonts + Hoda + Empty regardless of dataset mode."
-        ),
-    )
-
-    if not st.button("Start Training Sequence", width='stretch'):
+    if not st.button("Start Training Sequence", use_container_width=True):
         return
 
     clear_cancel("training")
@@ -109,37 +162,63 @@ def render_training_page(device: torch.device) -> None:
     st.info("Initialising DataLoaders…")
     os.makedirs('models', exist_ok=True)
 
-    is_persian_only  = dataset_mode.startswith("Persian Only")
-    is_english_only  = dataset_mode.startswith("English Only")
-    is_unified_mode  = dataset_mode.startswith("Unified")
-    is_lang_specific = is_persian_only or is_english_only
-
     try:
-        if is_unified_mode:
-            _run_unified(
+        if model_choice == "EfficientNetDigit":
+            _run_efficientnet(
                 device, data_path, batch_size, epochs, learning_rate,
-                unified_backbone, unified_pretrained, dataset_mode,
-                weight_decay=weight_decay, lr_schedule=lr_schedule,
+                purpose, dataset_choice, aug_choice,
+                eff_pretrained, eff_phase1_epochs, eff_phase2_epochs,
+                weight_decay=weight_decay,
             )
 
-        elif is_lang_specific:
-            _run_lang_specific(
-                device, data_path, batch_size, epochs, learning_rate,
-                dataset_mode, is_persian_only,
-                weight_decay=weight_decay, lr_schedule=lr_schedule,
-            )
-
-        elif enable_multitask:
+        elif model_choice == "MultiTaskCNN":
             _run_multitask(
                 device, data_path, batch_size, epochs, learning_rate,
                 weight_decay=weight_decay, lr_schedule=lr_schedule,
             )
 
-        else:
-            _run_singletask(
-                device, data_path, batch_size, epochs, learning_rate, dataset_mode,
+        elif model_choice in ("UnifiedCNN — MobileNetV3", "UnifiedCNN — ShuffleNetV2"):
+            dataset_mode_str = _map_dataset_to_legacy(dataset_choice)
+            _run_unified(
+                device, data_path, batch_size, epochs, learning_rate,
+                unified_backbone, unified_pretrained, dataset_mode_str,
                 weight_decay=weight_decay, lr_schedule=lr_schedule,
             )
+
+        elif purpose == "Persian":
+            _run_lang_specific(
+                device, data_path, batch_size, epochs, learning_rate,
+                "Persian Only (Hoda — saves best_model_persian.pt)", is_persian_only=True,
+                weight_decay=weight_decay, lr_schedule=lr_schedule, aug_preset=aug_choice,
+            )
+
+        elif purpose == "English":
+            dataset_mode_str = _map_dataset_to_legacy(dataset_choice)
+            _run_singletask(
+                device, data_path, batch_size, epochs, learning_rate, dataset_mode_str,
+                weight_decay=weight_decay, lr_schedule=lr_schedule, aug_preset=aug_choice,
+            )
+
+        else:  # Multi + DigitCNN
+            if multi_mode and "Separate" in multi_mode:
+                st.info("Running Persian training…")
+                _run_lang_specific(
+                    device, data_path, batch_size, epochs, learning_rate,
+                    "Persian Only (Hoda — saves best_model_persian.pt)", is_persian_only=True,
+                    weight_decay=weight_decay, lr_schedule=lr_schedule, aug_preset=aug_choice,
+                )
+                st.info("Running English training…")
+                _run_lang_specific(
+                    device, data_path, batch_size, epochs, learning_rate,
+                    "English Only (MNIST + Fonts — saves best_model_english.pt)", is_persian_only=False,
+                    weight_decay=weight_decay, lr_schedule=lr_schedule, aug_preset=aug_choice,
+                )
+            else:
+                _run_singletask(
+                    device, data_path, batch_size, epochs, learning_rate,
+                    "MNIST + Fonts + Hoda (All)",
+                    weight_decay=weight_decay, lr_schedule=lr_schedule, aug_preset=aug_choice,
+                )
 
     except RunCancelled as e:
         st.warning(str(e))
@@ -150,6 +229,22 @@ def render_training_page(device: torch.device) -> None:
         import traceback
         st.error(f"Training Error: {e}")
         st.code(traceback.format_exc())
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _map_dataset_to_legacy(dataset_choice: str) -> str:
+    """Map new UI dataset strings to legacy dataset_mode strings used by existing _run_* functions."""
+    mapping = {
+        "MNIST Only":               "MNIST Only",
+        "MNIST + Fonts":            "MNIST + Fonts (Recommended for printed Sudoku)",
+        "MNIST + Fonts + Hoda (All)": "MNIST + Fonts + Hoda (All)",
+        "MNIST + Hoda":             "MNIST + Hoda",
+        "Persian Only (Hoda)":      "Persian Only (Hoda — saves best_model_persian.pt)",
+    }
+    return mapping.get(dataset_choice, dataset_choice)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -298,7 +393,8 @@ def _run_unified(device, data_path, batch_size, epochs, lr, backbone, pretrained
 
 
 def _run_lang_specific(device, data_path, batch_size, epochs, lr, dataset_mode, is_persian_only,
-                       weight_decay: float = 1e-4, lr_schedule: str = "ReduceLROnPlateau"):
+                       weight_decay: float = 1e-4, lr_schedule: str = "ReduceLROnPlateau",
+                       aug_preset: str = "full"):
     if is_persian_only:
         train_loader, val_loader, test_loader = get_dataloaders_persian(data_path, batch_size=batch_size)
         if train_loader is None:
@@ -312,6 +408,9 @@ def _run_lang_specific(device, data_path, batch_size, epochs, lr, dataset_mode, 
         save_path  = 'models/best_model_english.pt'
         lang_label = "English"
         st.info("Training dedicated English model (MNIST + Fonts + empty cells).")
+
+    from src.data_utils import build_train_transform_preset
+    train_loader.dataset.transform = build_train_transform_preset(aug_preset)
 
     model     = DigitCNN(num_classes=10).to(device)
     criterion = FocalLoss(alpha=0.25, gamma=2.0)
@@ -566,7 +665,8 @@ def _run_multitask(device, data_path, batch_size, epochs, lr,
 
 
 def _run_singletask(device, data_path, batch_size, epochs, lr, dataset_mode,
-                    weight_decay: float = 1e-4, lr_schedule: str = "ReduceLROnPlateau"):
+                    weight_decay: float = 1e-4, lr_schedule: str = "ReduceLROnPlateau",
+                    aug_preset: str = "full"):
     if dataset_mode.startswith("MNIST + Fonts + Hoda"):
         train_loader, val_loader, test_loader = get_dataloaders_all(data_path, batch_size=batch_size)
     elif dataset_mode.startswith("MNIST + Hoda"):
@@ -575,6 +675,9 @@ def _run_singletask(device, data_path, batch_size, epochs, lr, dataset_mode,
         train_loader, val_loader, test_loader = get_dataloaders_mnist_only(batch_size=batch_size)
     else:
         train_loader, val_loader, test_loader = get_dataloaders(data_path, batch_size=batch_size)
+
+    from src.data_utils import build_train_transform_preset
+    train_loader.dataset.transform = build_train_transform_preset(aug_preset)
 
     model     = DigitCNN(num_classes=10).to(device)
     criterion = FocalLoss(alpha=0.25, gamma=2.0)
@@ -669,6 +772,131 @@ def _run_singletask(device, data_path, batch_size, epochs, lr, dataset_mode,
         "lr": lr, "weight_decay": weight_decay, "lr_schedule": lr_schedule,
         "best_val_loss": best_val_loss, "test_acc": t_acc,
         "total_time_s": sum(time_history),
+    })
+    st.success(f"All plots saved to `{run_dir}/`")
+    st.sidebar.success(f"Plots → `{run_dir}/`")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EfficientNet two-phase training path
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _run_efficientnet(
+    device, data_path, batch_size, epochs, lr,
+    purpose, dataset_choice, aug_preset,
+    pretrained, phase1_epochs, phase2_epochs,
+    weight_decay: float = 1e-4,
+):
+    from src.data_utils import get_dataloaders_efficientnet
+    from src.train import run_twophase_training
+
+    dataset_mode_map = {
+        "MNIST Only":                 "mnist_only",
+        "MNIST + Fonts":              "mnist_fonts",
+        "MNIST + Fonts + Hoda (All)": "all",
+        "MNIST + Hoda":               "mnist_hoda",
+        "Persian Only (Hoda)":        "persian",
+    }
+    dataset_mode = dataset_mode_map.get(dataset_choice, "all")
+
+    train_loader, val_loader, test_loader = get_dataloaders_efficientnet(
+        data_path, dataset_mode=dataset_mode, batch_size=batch_size, aug_preset=aug_preset,
+    )
+
+    model = EfficientNetDigitCNN(num_classes=10, pretrained=pretrained).to(device)
+    total_p, _ = model.param_count()
+    st.info(
+        f"EfficientNet-B0 | Params: **{total_p:,}** | Pretrained: {pretrained} | "
+        f"Dataset: {dataset_choice} | Aug: {aug_preset}"
+    )
+
+    criterion = FocalLoss(alpha=0.25, gamma=2.0)
+
+    progress_bar = st.progress(0)
+    status_text  = st.empty()
+    lc1, lc2    = st.columns(2)
+    with lc1:
+        st.markdown("#### Loss"); loss_ph = st.empty()
+    with lc2:
+        st.markdown("#### Accuracy"); acc_ph = st.empty()
+    metrics_tbl = st.empty()
+
+    total_epochs  = phase1_epochs + phase2_epochs
+    epoch_counter = [0]
+
+    def on_epoch_end(epoch_idx, phase, t_loss, t_acc, v_loss, v_acc):
+        epoch_counter[0] += 1
+        status_text.markdown(f"**Epoch {epoch_counter[0]}/{total_epochs} — Phase: {phase}**")
+        progress_bar.progress(epoch_counter[0] / total_epochs)
+        metrics_tbl.markdown(
+            f"| Metric | Train | Val |\n|---|---|---|\n"
+            f"| **Loss** | {t_loss:.4f} | {v_loss:.4f} |\n"
+            f"| **Accuracy** | {t_acc:.2f}% | {v_acc:.2f}% |\n"
+            f"| **Phase** | {phase} | — |"
+        )
+
+    save_path = f'models/best_model_efficientnet_{purpose.lower()}.pt'
+
+    history, best_val_loss = run_twophase_training(
+        model, train_loader, val_loader, criterion, device,
+        epochs_phase1=phase1_epochs,
+        epochs_phase2=phase2_epochs,
+        lr_phase1=lr,
+        lr_phase2=lr * 0.01,
+        weight_decay=weight_decay,
+        unfreeze_blocks=3,
+        should_stop=lambda: raise_if_cancelled("training"),
+        on_epoch_end=on_epoch_end,
+    )
+
+    loss_ph.line_chart(pd.DataFrame({'Train': history['Train Loss'], 'Val': history['Val Loss']}))
+    acc_ph.line_chart(pd.DataFrame({'Train': history['Train Acc'],  'Val': history['Val Acc']}))
+
+    torch.save(model.state_dict(), save_path)
+    status_text.success(f"Done! Saved to `{save_path}` (best val loss: {best_val_loss:.4f})")
+
+    st.markdown("---"); st.markdown("### Test Set Evaluation")
+    with st.spinner("Evaluating…"):
+        t_loss, t_acc = validate(model, test_loader, criterion, device,
+                                  should_stop=lambda: raise_if_cancelled("training"))
+        st.metric("Test Accuracy", f"{t_acc:.2f}%", delta=f"Loss: {t_loss:.4f}", delta_color="inverse")
+
+    st.markdown("---"); st.markdown("### Confusion Matrix")
+    with st.spinner("Computing…"):
+        y_true, y_pred = collect_predictions(model, test_loader, device,
+                                              should_stop=lambda: raise_if_cancelled("training"))
+        all_lbl     = sorted(set(y_true) | set(y_pred))
+        class_names = ["Empty" if l == 0 else str(l) for l in all_lbl]
+        cm_fig = plot_confusion_matrix(y_true, y_pred, class_names)
+        st.pyplot(cm_fig); plt.close('all')
+        cm_arr = confusion_matrix(y_true, y_pred, labels=all_lbl)
+        pca    = cm_arr.diagonal() / cm_arr.sum(axis=1).clip(min=1) * 100
+        st.dataframe(pd.DataFrame({
+            'Class': class_names, 'Correct': cm_arr.diagonal(),
+            'Total': cm_arr.sum(axis=1), 'Accuracy (%)': [f"{a:.1f}" for a in pca],
+        }).set_index('Class'), use_container_width=True)
+
+    rpt = save_training_report(
+        history=history, test_loss=t_loss, test_acc=t_acc,
+        y_true=y_true, y_pred=y_pred,
+        dataset_mode=f"EfficientNet-B0 [{dataset_choice}] aug={aug_preset}",
+        epochs=total_epochs, learning_rate=lr, batch_size=batch_size,
+        best_val_loss=best_val_loss, model=model,
+        output_path=f'models/training_report_efficientnet_{purpose.lower()}.txt',
+    )
+    st.success(f"Report saved to `{rpt}`")
+    with open(rpt, 'r', encoding='utf-8') as f:
+        st.download_button("Download EfficientNet Report (.txt)",
+                           f.read(), f'training_report_efficientnet_{purpose.lower()}.txt', 'text/plain')
+
+    run_dir = make_run_dir(f"EfficientNet_{purpose}", total_epochs, batch_size, lr, weight_decay)
+    save_fig(plot_singletask_summary(history, [], []), run_dir, "01_summary.png")
+    save_fig(cm_fig, run_dir, "04_confusion_matrix.png")
+    save_run_metadata(run_dir, {
+        "model": "EfficientNetDigit", "purpose": purpose, "dataset": dataset_choice,
+        "aug_preset": aug_preset, "pretrained": pretrained,
+        "epochs_phase1": phase1_epochs, "epochs_phase2": phase2_epochs,
+        "best_val_loss": best_val_loss, "test_acc": t_acc,
     })
     st.success(f"All plots saved to `{run_dir}/`")
     st.sidebar.success(f"Plots → `{run_dir}/`")
