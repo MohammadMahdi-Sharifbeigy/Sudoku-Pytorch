@@ -57,6 +57,7 @@ PREPROCESS_DEFAULTS = {
     "slice_erode_kernel_size": 2,
     "slice_erode_iterations":  3,
     "digit_scale":             20,
+    "pipeline":                "Original",
 }
 
 
@@ -85,6 +86,7 @@ def init_preprocess_draft(config: dict) -> None:
         "draft_slice_erode_kernel": config["slice_erode_kernel_size"],
         "draft_slice_erode_iter":   config["slice_erode_iterations"],
         "draft_digit_scale":        config["digit_scale"],
+        "draft_pipeline":           config["pipeline"],
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -110,6 +112,7 @@ def current_preprocess_draft() -> dict:
         "slice_erode_kernel_size": st.session_state.draft_slice_erode_kernel,
         "slice_erode_iterations":  st.session_state.draft_slice_erode_iter,
         "digit_scale":             st.session_state.draft_digit_scale,
+        "pipeline":                st.session_state.draft_pipeline,
     }
 
 
@@ -243,6 +246,19 @@ def render_preprocess_sidebar() -> dict:
                 "20 = MNIST-like default. "
                 "Lower → more padding (safer for Persian strokes, odd digits). "
                 "Higher → tighter crop (may clip thin strokes)."
+            ),
+        )
+
+        st.markdown("---")
+        st.markdown("**Vision Pipeline**")
+        st.selectbox(
+            "Pipeline",
+            ["Original", "B", "C"],
+            key="draft_pipeline",
+            help=(
+                "Original: multi-combo NMS contour detection (vision.py). "
+                "B: CLAHE + line removal + local quad curves (full alternative pipeline). "
+                "C: Original grid detection + B cell extraction (hybrid)."
             ),
         )
 

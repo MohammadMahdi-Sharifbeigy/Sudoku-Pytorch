@@ -21,10 +21,52 @@ from src.vision import (
     plot_cell_images_in_grid,
     resize_and_maintain_aspect_ratio,
     sharpen_image,
-    get_valid_cells_from_image as vision_get_cells,
+    get_valid_cells_from_image as _vision_get_cells_a,
     get_predicted_sudoku_grid_torch,
     generate_solution_image,
 )
+from src.vision_b import get_valid_cells_from_image_b as _vision_get_cells_b
+from src.vision_c import get_valid_cells_from_image_c as _vision_get_cells_c
+
+
+def vision_get_cells(pipeline="Original", **kwargs):
+    """Route to the correct vision pipeline."""
+    if pipeline == "B":
+        # B only uses img_rgb, digit_scale, should_stop
+        return _vision_get_cells_b(
+            kwargs["img"],
+            digit_scale=kwargs.get("digit_scale", 20),
+            should_stop=kwargs.get("should_stop"),
+        )
+    if pipeline == "C":
+        return _vision_get_cells_c(
+            kwargs["img"],
+            grid_threshold_combos=kwargs.get("grid_threshold_combos"),
+            blur_k=kwargs.get("blur_k", 3),
+            area_threshold=kwargs.get("area_threshold", 4.0),
+            erode_enabled=kwargs.get("erode_enabled", True),
+            contour_erode_kernel_size=kwargs.get("contour_erode_kernel_size", 3),
+            contour_erode_iterations=kwargs.get("contour_erode_iterations", 1),
+            slice_erode_kernel_size=kwargs.get("slice_erode_kernel_size", 2),
+            slice_erode_iterations=kwargs.get("slice_erode_iterations", 3),
+            digit_scale=kwargs.get("digit_scale", 20),
+            should_stop=kwargs.get("should_stop"),
+        )
+    # "Original"
+    return _vision_get_cells_a(
+        kwargs["img"],
+        grid_threshold_combos=kwargs.get("grid_threshold_combos"),
+        cell_threshold_combos=kwargs.get("cell_threshold_combos"),
+        blur_k=kwargs.get("blur_k", 3),
+        area_threshold=kwargs.get("area_threshold", 4.0),
+        erode_enabled=kwargs.get("erode_enabled", True),
+        contour_erode_kernel_size=kwargs.get("contour_erode_kernel_size", 3),
+        contour_erode_iterations=kwargs.get("contour_erode_iterations", 1),
+        slice_erode_kernel_size=kwargs.get("slice_erode_kernel_size", 2),
+        slice_erode_iterations=kwargs.get("slice_erode_iterations", 3),
+        digit_scale=kwargs.get("digit_scale", 20),
+        should_stop=kwargs.get("should_stop"),
+    )
 
 from app.cancel import RunCancelled, clear_cancel, raise_if_cancelled, render_stop_button
 from app.debug_utils import save_debug_outputs
@@ -335,6 +377,7 @@ def render_inference_page(device: torch.device) -> None:
     slice_erode_kernel_size = active_preprocess["slice_erode_kernel_size"]
     slice_erode_iterations  = active_preprocess["slice_erode_iterations"]
     digit_scale             = active_preprocess.get("digit_scale", 20)
+    pipeline_choice         = active_preprocess.get("pipeline", "Original")
 
     # ── Main: tabs ────────────────────────────────────────────────────
     tab_solve, tab_debug = st.tabs(["Solve Sudoku", "Preprocessing Debug"])
@@ -411,7 +454,8 @@ def render_inference_page(device: torch.device) -> None:
                     err_orig = None
                     try:
                         cells_orig, M_orig, board_orig = vision_get_cells(
-                            img,
+                            pipeline=pipeline_choice,
+                            img=img,
                             grid_threshold_combos=active_grid_combos,
                             cell_threshold_combos=DEFAULT_CELL_THRESHOLD_COMBOS,
                             blur_k=blur_k,
@@ -543,7 +587,8 @@ def render_inference_page(device: torch.device) -> None:
             with st.spinner("Running vision pipeline for debug…"):
                 try:
                     dbg_cells, _, dbg_board = vision_get_cells(
-                        img_dbg,
+                        pipeline=pipeline_choice,
+                        img=img_dbg,
                         grid_threshold_combos=active_grid_combos,
                         cell_threshold_combos=DEFAULT_CELL_THRESHOLD_COMBOS,
                         blur_k=blur_k,
