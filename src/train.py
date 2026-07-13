@@ -179,3 +179,82 @@ def collect_predictions_multitask(model, loader, device, should_stop=None):
             _check_stop(should_stop)
 
     return d_targets, d_preds, l_targets, l_preds
+
+
+def run_twophase_training(
+    model,
+    train_loader,
+    val_loader,
+    criterion,
+    device,
+    epochs_phase1: int = 6,
+    epochs_phase2: int = 14,
+    lr_phase1: float = 1e-3,
+    lr_phase2: float = 1e-5,
+    weight_decay: float = 1e-4,
+    unfreeze_blocks: int = 3,
+    should_stop=None,
+    on_epoch_end=None,
+):
+    """Two-phase training for EfficientNetDigitCNN.
+
+    Phase 1: freeze backbone, train head only (lr_phase1, epochs_phase1 epochs).
+    Phase 2: unfreeze last unfreeze_blocks feature blocks (lr_phase2, epochs_phase2 epochs).
+    BN remains frozen in both phases (correct for ImageNet-pretrained transfer).
+
+    on_epoch_end(epoch_idx, phase, train_loss, train_acc, val_loss, val_acc) called each epoch.
+    Returns: (history dict, best_val_loss).
+    """
+    import copy
+    import torch.optim as optim
+
+    history = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': [], 'Phase': []}
+    best_val_loss = float('inf')
+    best_state = None
+
+    def _run_phase(phase_label, n_epochs, lr):
+        nonlocal best_val_loss, best_state
+        optimizer = optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=lr, weight_decay=weight_decay,
+        )
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, n_epochs))
+        for _ in range(n_epochs):
+            if should_stop:
+                should_stop()
+            # Re-freeze BN each epoch — model.train() would re-enable running stats otherwise
+            model.train()
+            model._freeze_batchnorm()
+
+            t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device,
+                                        should_stop=should_stop)
+            v_loss, v_acc = validate(model, val_loader, criterion, device,
+                                     should_stop=should_stop)
+            scheduler.step()
+
+            history['Train Loss'].append(t_loss)
+            history['Val Loss'].append(v_loss)
+            history['Train Acc'].append(t_acc)
+            history['Val Acc'].append(v_acc)
+            history['Phase'].append(phase_label)
+
+            if v_loss < best_val_loss:
+                best_val_loss = v_loss
+                best_state = copy.deepcopy(model.state_dict())
+
+            if on_epoch_end:
+                on_epoch_end(
+                    len(history['Train Loss']) - 1,
+                    phase_label, t_loss, t_acc, v_loss, v_acc,
+                )
+
+    model.freeze_backbone()
+    _run_phase("head-only", epochs_phase1, lr_phase1)
+
+    model.unfreeze_last_blocks(n=unfreeze_blocks)
+    _run_phase("fine-tune", epochs_phase2, lr_phase2)
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    return history, best_val_loss
