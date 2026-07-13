@@ -106,7 +106,12 @@ def perform_four_point_transform(input_img, src_corners, pad=10, size=None):
     return M, warped
 
 
-def center_and_resize_digit(cell_img):
+def center_and_resize_digit(cell_img, digit_scale: int = 20):
+    """Scale digit to fit within digit_scale×digit_scale px, centred on 28×28 canvas.
+
+    digit_scale controls zoom: lower = more padding (safer for odd strokes),
+    higher = more fill (closer to MNIST style). Range 10–26 is practical.
+    """
     contours, _ = cv2.findContours(cell_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return cv2.resize(cell_img, (28, 28), interpolation=cv2.INTER_AREA)
@@ -115,7 +120,7 @@ def center_and_resize_digit(cell_img):
     max_side = max(w, h)
     if max_side == 0:
         return cv2.resize(cell_img, (28, 28))
-    scale = 20.0 / max_side
+    scale = float(digit_scale) / max_side
     nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
     resized = cv2.resize(digit, (nw, nh), interpolation=cv2.INTER_AREA)
     canvas = np.zeros((28, 28), dtype=np.uint8)
@@ -279,6 +284,7 @@ def locate_cells_within_grid(
     erode_enabled=True,
     erode_kernel_size=3,
     erode_iterations=1,
+    digit_scale=20,
     should_stop=None,
 ):
     """
@@ -352,7 +358,7 @@ def locate_cells_within_grid(
                 _erode_k = cv2.getStructuringElement(
                     cv2.MORPH_ELLIPSE, (erode_kernel_size, erode_kernel_size))
                 cell_img = cv2.erode(cell_img, _erode_k, iterations=erode_iterations)
-            cell_img = center_and_resize_digit(cell_img) if has_digit else np.zeros((28, 28), dtype=np.uint8)
+            cell_img = center_and_resize_digit(cell_img, digit_scale=digit_scale) if has_digit else np.zeros((28, 28), dtype=np.uint8)
             moments  = cv2.moments(contour)
             if moments['m00'] == 0:
                 continue
@@ -409,6 +415,7 @@ def slice_grid_into_cells(
     erode_enabled=True,
     erode_kernel_size=2,
     erode_iterations=3,
+    digit_scale=20,
     should_stop=None,
 ):
     """
@@ -445,7 +452,7 @@ def slice_grid_into_cells(
                 _erode_k = cv2.getStructuringElement(
                     cv2.MORPH_ELLIPSE, (erode_kernel_size, erode_kernel_size))
                 thr = cv2.erode(thr, _erode_k, iterations=erode_iterations)
-            cell_img = center_and_resize_digit(thr) if has_digit \
+            cell_img = center_and_resize_digit(thr, digit_scale=digit_scale) if has_digit \
                 else np.zeros((28, 28), dtype=np.uint8)
 
             cells.append({
@@ -532,6 +539,7 @@ def get_valid_cells_from_image(
     contour_erode_iterations=1,
     slice_erode_kernel_size=2,
     slice_erode_iterations=3,
+    digit_scale=20,
     should_stop=None,
 ):
     """
@@ -568,6 +576,7 @@ def get_valid_cells_from_image(
             erode_enabled=erode_enabled,
             erode_kernel_size=contour_erode_kernel_size,
             erode_iterations=contour_erode_iterations,
+            digit_scale=digit_scale,
             should_stop=should_stop,
         )
         if len(cells) == 81:
@@ -600,6 +609,7 @@ def get_valid_cells_from_image(
         erode_enabled=erode_enabled,
         erode_kernel_size=slice_erode_kernel_size,
         erode_iterations=slice_erode_iterations,
+        digit_scale=digit_scale,
         should_stop=should_stop,
     )
     return cells, M_sq, grid_sq

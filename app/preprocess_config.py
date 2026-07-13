@@ -50,12 +50,13 @@ PREPROCESS_DEFAULTS = {
     "area_thresh":             4.0,
     "grid_combo_text":         format_threshold_combos(DEFAULT_GRID_THRESHOLD_COMBOS),
     "selected_grid_combo_label": threshold_combo_label(0, DEFAULT_GRID_THRESHOLD_COMBOS[0]),
-    "grid_combo_mode":         "Auto loop all combos",
+    "grid_combo_mode":         "Use selected combo only",
     "erode_enabled":           True,
     "erode_kernel_size":       3,
     "erode_iterations":        1,
     "slice_erode_kernel_size": 2,
     "slice_erode_iterations":  3,
+    "digit_scale":             20,
 }
 
 
@@ -83,6 +84,7 @@ def init_preprocess_draft(config: dict) -> None:
         "draft_erode_iter":      config["erode_iterations"],
         "draft_slice_erode_kernel": config["slice_erode_kernel_size"],
         "draft_slice_erode_iter":   config["slice_erode_iterations"],
+        "draft_digit_scale":        config["digit_scale"],
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -107,6 +109,7 @@ def current_preprocess_draft() -> dict:
         "erode_iterations":        st.session_state.draft_erode_iter,
         "slice_erode_kernel_size": st.session_state.draft_slice_erode_kernel,
         "slice_erode_iterations":  st.session_state.draft_slice_erode_iter,
+        "digit_scale":             st.session_state.draft_digit_scale,
     }
 
 
@@ -206,6 +209,21 @@ def render_preprocess_sidebar() -> dict:
             st.rerun()
 
         st.markdown("---")
+        st.markdown("**Grid Loop Mode**")
+        _loop_on = st.toggle(
+            "Try all threshold combos (grid loop)",
+            value=(st.session_state.get("draft_grid_combo_mode", config["grid_combo_mode"])
+                   == "Auto loop all combos"),
+            key="draft_grid_loop_toggle",
+            help=(
+                "Off (default): use only the selected combo — fast, predictable. "
+                "On: try all combos and pick the best — slower but more robust on unusual images."
+            ),
+        )
+        st.session_state.draft_grid_combo_mode = (
+            "Auto loop all combos" if _loop_on else "Use selected combo only"
+        )
+        st.markdown("---")
         st.markdown("**Morphological Erosion**")
         st.toggle("Enable erosion", key="draft_erode_enabled")
         st.select_slider("Contour-path kernel", options=[1, 2, 3, 4, 5],
@@ -215,6 +233,18 @@ def render_preprocess_sidebar() -> dict:
                          key="draft_slice_erode_kernel")
         st.slider("Slice-fallback iterations", min_value=0, max_value=5,
                   key="draft_slice_erode_iter")
+        st.markdown("---")
+        st.markdown("**Digit Scaling**")
+        st.slider(
+            "Digit scale (px within 28×28)", min_value=10, max_value=26, step=1,
+            key="draft_digit_scale",
+            help=(
+                "Controls how large the digit is drawn on the 28×28 canvas. "
+                "20 = MNIST-like default. "
+                "Lower → more padding (safer for Persian strokes, odd digits). "
+                "Higher → tighter crop (may clip thin strokes)."
+            ),
+        )
 
         apply_col, reset_col = st.columns(2)
         with apply_col:

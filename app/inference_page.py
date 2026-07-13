@@ -334,6 +334,7 @@ def render_inference_page(device: torch.device) -> None:
     erode_iterations        = active_preprocess["erode_iterations"]
     slice_erode_kernel_size = active_preprocess["slice_erode_kernel_size"]
     slice_erode_iterations  = active_preprocess["slice_erode_iterations"]
+    digit_scale             = active_preprocess.get("digit_scale", 20)
 
     # ── Main: tabs ────────────────────────────────────────────────────
     tab_solve, tab_debug = st.tabs(["Solve Sudoku", "Preprocessing Debug"])
@@ -420,6 +421,7 @@ def render_inference_page(device: torch.device) -> None:
                             contour_erode_iterations=erode_iterations,
                             slice_erode_kernel_size=slice_erode_kernel_size,
                             slice_erode_iterations=slice_erode_iterations,
+                            digit_scale=digit_scale,
                             should_stop=lambda: raise_if_cancelled("inference"),
                         )
                     except RunCancelled:
@@ -537,11 +539,31 @@ def render_inference_page(device: torch.device) -> None:
             if enable_sharpen:
                 img_dbg = sharpen_image(img_dbg, use_nlm=use_nlm, center=sharpen_center)
 
+            dbg_board, dbg_cells, dbg_pipeline = None, None, "debug"
+            with st.spinner("Running vision pipeline for debug…"):
+                try:
+                    dbg_cells, _, dbg_board = vision_get_cells(
+                        img_dbg,
+                        grid_threshold_combos=active_grid_combos,
+                        cell_threshold_combos=DEFAULT_CELL_THRESHOLD_COMBOS,
+                        blur_k=blur_k,
+                        area_threshold=area_thresh,
+                        erode_enabled=erode_enabled,
+                        contour_erode_kernel_size=erode_kernel_size,
+                        contour_erode_iterations=erode_iterations,
+                        slice_erode_kernel_size=slice_erode_kernel_size,
+                        slice_erode_iterations=slice_erode_iterations,
+                        digit_scale=digit_scale,
+                    )
+                    dbg_pipeline = "debug-vision"
+                except Exception as _dbg_err:
+                    st.warning(f"Vision pipeline: {_dbg_err}")
+
             _render_debug_steps(
                 img_dbg, img_dbg_orig, enable_sharpen, use_nlm, sharpen_center,
                 blur_k, thresh_method, thresh_bs, thresh_c,
                 grid_threshold_combos, selected_grid_combo, sel_label,
-                grid_combo_mode, None, "debug", None,
+                grid_combo_mode, dbg_board, dbg_pipeline, dbg_cells,
                 area_thresh, erode_enabled, erode_kernel_size, erode_iterations,
                 slice_erode_kernel_size, slice_erode_iterations,
             )
