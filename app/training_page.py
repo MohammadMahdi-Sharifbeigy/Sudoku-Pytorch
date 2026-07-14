@@ -380,7 +380,7 @@ def _render_done(device: torch.device) -> None:
         return
 
     model_type = result.get('model_type', '')
-    st.success(f"✅ Training complete — saved to `{result.get('save_path', '?')}`")
+    st.success(f"Training complete — saved to `{result.get('save_path', '?')}`")
     st.markdown(f"Best val loss: `{result.get('best_val_loss', 0):.4f}`")
 
     # ── Training curves ───────────────────────────────────────────────────────
@@ -444,7 +444,7 @@ def _render_done(device: torch.device) -> None:
         else:
             class_names = ["Empty" if l == 0 else str(l) for l in all_lbl]
 
-        cm_fig = plot_confusion_matrix(y_true, y_pred, class_names)
+        cm_fig = plot_confusion_matrix(y_true, y_pred, class_names, labels=all_lbl)
         st.pyplot(cm_fig)
         plt.close(cm_fig)
 
@@ -490,7 +490,6 @@ def _render_done(device: torch.device) -> None:
         if heading:
             st.markdown(f"#### {heading}")
         st.caption(f"Saved to `{r.get('plots_dir', '')}`")
-        cols = st.columns(2)
         labels = {
             'learning_curve':        'Learning Curve',
             'training_history':      'Training History',
@@ -498,11 +497,21 @@ def _render_done(device: torch.device) -> None:
             'confusion_matrix_lang': 'Language Confusion Matrix',
             'lr_schedule':           'LR Schedule',
         }
-        for i, (key, path) in enumerate(plot_paths.items()):
-            if key == 'history_csv' or not os.path.exists(path):
-                continue
-            with cols[i % 2]:
-                st.image(path, caption=labels.get(key, key), width='stretch')
+        full_width_keys = ('training_history', 'confusion_matrix', 'confusion_matrix_lang')
+        for key in full_width_keys:
+            path = plot_paths.get(key)
+            if path and os.path.exists(path):
+                st.image(path, caption=labels.get(key, key), use_container_width=True)
+
+        compact_items = [
+            (key, path) for key, path in plot_paths.items()
+            if key not in (*full_width_keys, 'history_csv') and os.path.exists(path)
+        ]
+        if compact_items:
+            cols = st.columns(2)
+            for i, (key, path) in enumerate(compact_items):
+                with cols[i % 2]:
+                    st.image(path, caption=labels.get(key, key), use_container_width=True)
         if 'history_csv' in plot_paths and os.path.exists(plot_paths['history_csv']):
             with open(plot_paths['history_csv'], 'r', encoding='utf-8') as f:
                 st.download_button("⬇ Download history.csv", f.read(),

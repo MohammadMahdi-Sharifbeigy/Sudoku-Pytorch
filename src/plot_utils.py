@@ -32,6 +32,12 @@ _C_TRAIN   = '#2a78d6'
 _C_VAL     = '#e34948'
 
 
+def _save_clean(fig, save_path: str) -> str:
+    fig.savefig(save_path, dpi=150, bbox_inches='tight', pad_inches=0.08, facecolor=_SURFACE)
+    plt.close(fig)
+    return save_path
+
+
 def _paper_style(ax, title: str, ylabel: str = '', xlabel: str = 'Epoch') -> None:
     ax.set_facecolor(_SURFACE)
     ax.set_title(title, color=_INK, fontsize=12, fontweight='bold', pad=8)
@@ -70,7 +76,7 @@ def save_learning_curve(history: dict, save_path: str) -> str:
     df = pd.DataFrame(history)
     epochs = _epochs(history)
 
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    fig, ax = plt.subplots(figsize=(7, 4.5), constrained_layout=True)
     fig.patch.set_facecolor(_SURFACE)
     ax.plot(epochs, df['Train Loss'], color=_C_TRAIN, linewidth=2,
             marker='o', markersize=4, markevery=max(1, len(epochs) // 12), label='Train')
@@ -78,10 +84,7 @@ def save_learning_curve(history: dict, save_path: str) -> str:
             marker='s', markersize=4, markevery=max(1, len(epochs) // 12), label='Validation')
     _paper_style(ax, 'Learning Curve', ylabel='Loss')
     ax.legend(frameon=False, labelcolor=_INK, fontsize=9, loc='best')
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=_SURFACE)
-    plt.close(fig)
-    return save_path
+    return _save_clean(fig, save_path)
 
 
 def save_train_history(history: dict, save_path: str) -> str:
@@ -95,13 +98,13 @@ def save_train_history(history: dict, save_path: str) -> str:
     is_multitask = 'Train Digit Acc' in df.columns
 
     if is_multitask:
-        fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), constrained_layout=True)
         panels = [
             (axes[0], 'Train Digit Acc', 'Val Digit Acc', 'Digit Accuracy'),
             (axes[1], 'Train Lang Acc',  'Val Lang Acc',  'Language Accuracy'),
         ]
     else:
-        fig, ax = plt.subplots(figsize=(7, 4.5))
+        fig, ax = plt.subplots(figsize=(7, 4.5), constrained_layout=True)
         panels = [(ax, 'Train Acc', 'Val Acc', 'Training History')]
 
     fig.patch.set_facecolor(_SURFACE)
@@ -113,10 +116,7 @@ def save_train_history(history: dict, save_path: str) -> str:
         _paper_style(ax, title, ylabel='Accuracy (%)')
         ax.legend(frameon=False, labelcolor=_INK, fontsize=9, loc='best')
 
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=_SURFACE)
-    plt.close(fig)
-    return save_path
+    return _save_clean(fig, save_path)
 
 
 def save_confusion_matrix(y_true, y_pred, class_names, save_path: str,
@@ -126,8 +126,14 @@ def save_confusion_matrix(y_true, y_pred, class_names, save_path: str,
     cm = confusion_matrix(y_true, y_pred, labels=list(range(n)))
     row_sum = cm.sum(axis=1, keepdims=True).clip(min=1)
     cm_norm = cm.astype(float) / row_sum
+    tick_size = 8 if n > 12 else 9
+    diag_size = 7 if n > 12 else 8
+    offdiag_size = 6 if n > 12 else 7
 
-    fig, ax = plt.subplots(figsize=(max(6, n * 0.6), max(5, n * 0.55)))
+    fig, ax = plt.subplots(
+        figsize=(max(7.2, n * 0.72), max(6.2, n * 0.62)),
+        constrained_layout=True,
+    )
     fig.patch.set_facecolor(_SURFACE)
     ax.set_facecolor(_SURFACE)
 
@@ -135,14 +141,20 @@ def save_confusion_matrix(y_true, y_pred, class_names, save_path: str,
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.ax.yaxis.set_tick_params(color=_INK_MUTED)
     plt.setp(cbar.ax.yaxis.get_ticklabels(), color=_INK_SOFT)
-    cbar.set_label('Row-normalised accuracy', color=_INK_SOFT, fontsize=9)
+    cbar.set_label('Row-normalized accuracy', color=_INK_SOFT, fontsize=9)
 
     ax.set_xticks(range(n)); ax.set_yticks(range(n))
-    ax.set_xticklabels(class_names, color=_INK_SOFT, fontsize=9, rotation=45, ha='right')
-    ax.set_yticklabels(class_names, color=_INK_SOFT, fontsize=9)
-    ax.set_xlabel('Predicted', color=_INK, fontsize=11, labelpad=8)
-    ax.set_ylabel('True', color=_INK, fontsize=11, labelpad=8)
-    ax.set_title(f'{title}\n(count  /  row %)', color=_INK, fontsize=12, pad=12)
+    ax.set_xticklabels(class_names, color=_INK_SOFT, fontsize=tick_size, rotation=45, ha='right')
+    ax.set_yticklabels(class_names, color=_INK_SOFT, fontsize=tick_size)
+    ax.set_xlabel('Predicted', color=_INK, fontsize=11, labelpad=10)
+    ax.set_ylabel('True', color=_INK, fontsize=11, labelpad=10)
+    ax.set_title(f'{title}\nDiagonal: count / row %, off-diagonal: count',
+                 color=_INK, fontsize=12, pad=12)
+    ax.set_aspect('equal')
+    ax.set_xticks([x - 0.5 for x in range(1, n)], minor=True)
+    ax.set_yticks([y - 0.5 for y in range(1, n)], minor=True)
+    ax.grid(which='minor', color='white', linewidth=1.0)
+    ax.tick_params(which='minor', bottom=False, left=False)
     for spine in ax.spines.values():
         spine.set_edgecolor(_AXIS)
 
@@ -153,13 +165,20 @@ def save_confusion_matrix(y_true, y_pred, class_names, save_path: str,
                 continue
             pct = cm_norm[i, j] * 100
             txt_color = 'white' if cm_norm[i, j] > 0.55 else _INK
-            ax.text(j, i, f'{count}\n{pct:.1f}%', ha='center', va='center',
-                    fontsize=8, color=txt_color, fontweight='bold', linespacing=1.4)
+            if i == j:
+                label = f'{count}\n{pct:.1f}%'
+                fontsize = diag_size
+                weight = 'bold'
+            else:
+                if n > 12 and pct < 0.5:
+                    continue
+                label = f'{count}'
+                fontsize = offdiag_size
+                weight = 'normal'
+            ax.text(j, i, label, ha='center', va='center',
+                    fontsize=fontsize, color=txt_color, fontweight=weight, linespacing=1.15)
 
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=_SURFACE)
-    plt.close(fig)
-    return save_path
+    return _save_clean(fig, save_path)
 
 
 def save_lr_schedule(history: dict, save_path: str, phase_boundaries: list = None) -> str:
@@ -172,7 +191,7 @@ def save_lr_schedule(history: dict, save_path: str, phase_boundaries: list = Non
     lr_history = history.get('LR', [])
     epochs = list(range(1, len(lr_history) + 1))
 
-    fig, ax = plt.subplots(figsize=(7, 3.5))
+    fig, ax = plt.subplots(figsize=(7, 3.5), constrained_layout=True)
     fig.patch.set_facecolor(_SURFACE)
     ax.plot(epochs, lr_history, color=_C_TRAIN, linewidth=2,
             marker='o', markersize=4, markevery=max(1, len(epochs) // 15))
@@ -185,10 +204,7 @@ def save_lr_schedule(history: dict, save_path: str, phase_boundaries: list = Non
                        label='Phase change' if i == 0 else None)
         ax.legend(frameon=False, labelcolor=_INK, fontsize=9, loc='best')
 
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor=_SURFACE)
-    plt.close(fig)
-    return save_path
+    return _save_clean(fig, save_path)
 
 
 def generate_training_plots(history: dict, y_true, y_pred, class_names, run_dir: str,
