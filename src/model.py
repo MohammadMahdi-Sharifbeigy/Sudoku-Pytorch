@@ -122,6 +122,21 @@ class LegacyDigitCNN(nn.Module):
         return self.fc(x)
 
 
+def probe_digit_cnn_architecture(path: str) -> str:
+    """Peek at a checkpoint's state_dict keys to identify its architecture
+    without constructing or loading into a model. Cheap — just a key check.
+
+    Returns 'DigitCNN' or 'LegacyDigitCNN'.
+    """
+    state_dict = torch.load(path, map_location='cpu')
+    keys = set(state_dict.keys())
+    # LegacyDigitCNN has flat conv1/conv2/fc keys; current DigitCNN uses
+    # block1/block2/block3/classifier keys instead.
+    if 'conv1.weight' in keys and 'block1.0.weight' not in keys:
+        return 'LegacyDigitCNN'
+    return 'DigitCNN'
+
+
 def load_digit_cnn_checkpoint(path: str, device, num_classes: int = 10):
     """Load a DigitCNN checkpoint, falling back to LegacyDigitCNN if the
     state_dict doesn't match the current architecture.

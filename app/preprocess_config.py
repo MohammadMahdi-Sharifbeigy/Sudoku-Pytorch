@@ -39,14 +39,16 @@ def threshold_combos_to_frame(combos) -> pd.DataFrame:
     )
 
 
+_DEFAULT_COMBO_BS, _DEFAULT_COMBO_C = DEFAULT_GRID_THRESHOLD_COMBOS[0]
+
 PREPROCESS_DEFAULTS = {
     "enable_sharpen":          True,
-    "use_nlm":                 True,
+    "use_nlm":                 False,
     "sharpen_center":          5,
     "blur_k":                  3,
     "thresh_method":           "mean",
-    "thresh_bs":               11,
-    "thresh_c":                3,
+    "thresh_bs":               _DEFAULT_COMBO_BS,
+    "thresh_c":                _DEFAULT_COMBO_C,
     "area_thresh":             4.0,
     "grid_combo_text":         format_threshold_combos(DEFAULT_GRID_THRESHOLD_COMBOS),
     "selected_grid_combo_label": threshold_combo_label(0, DEFAULT_GRID_THRESHOLD_COMBOS[0]),
@@ -56,7 +58,7 @@ PREPROCESS_DEFAULTS = {
     "erode_iterations":        1,
     "slice_erode_kernel_size": 2,
     "slice_erode_iterations":  3,
-    "digit_scale":             20,
+    "digit_scale":             22,
     "pipeline":                "Original",
 }
 
@@ -64,7 +66,37 @@ PREPROCESS_DEFAULTS = {
 def applied_preprocess_config() -> dict:
     if "preprocess_applied" not in st.session_state:
         st.session_state.preprocess_applied = dict(PREPROCESS_DEFAULTS)
-    return st.session_state.preprocess_applied
+    
+    config = st.session_state.preprocess_applied
+    
+    # اطمینان از وجود تمام فیلدها در دیکشنری
+    for k, v in PREPROCESS_DEFAULTS.items():
+        if k not in config:
+            config[k] = v
+
+    # لایه اول اعتبارسنجی: جلوگیری از ذخیره مقادیر خارج از رنج اسلایدرها
+    if not (3 <= config["sharpen_center"] <= 13):
+        config["sharpen_center"] = PREPROCESS_DEFAULTS["sharpen_center"]
+    if config["blur_k"] not in [1, 3, 5, 7]:
+        config["blur_k"] = PREPROCESS_DEFAULTS["blur_k"]
+    if not (11 <= config["thresh_bs"] <= 111):
+        config["thresh_bs"] = PREPROCESS_DEFAULTS["thresh_bs"]
+    if not (1 <= config["thresh_c"] <= 25):
+        config["thresh_c"] = PREPROCESS_DEFAULTS["thresh_c"]
+    if not (0.5 <= config["area_thresh"] <= 10.0):
+        config["area_thresh"] = PREPROCESS_DEFAULTS["area_thresh"]
+    if config["erode_kernel_size"] not in [1, 2, 3, 4, 5]:
+        config["erode_kernel_size"] = PREPROCESS_DEFAULTS["erode_kernel_size"]
+    if not (0 <= config["erode_iterations"] <= 5):
+        config["erode_iterations"] = PREPROCESS_DEFAULTS["erode_iterations"]
+    if config["slice_erode_kernel_size"] not in [1, 2, 3, 4, 5]:
+        config["slice_erode_kernel_size"] = PREPROCESS_DEFAULTS["slice_erode_kernel_size"]
+    if not (0 <= config["slice_erode_iterations"] <= 5):
+        config["slice_erode_iterations"] = PREPROCESS_DEFAULTS["slice_erode_iterations"]
+    if not (10 <= config["digit_scale"] <= 26):
+        config["digit_scale"] = PREPROCESS_DEFAULTS["digit_scale"]
+
+    return config
 
 
 def init_preprocess_draft(config: dict) -> None:
@@ -88,8 +120,33 @@ def init_preprocess_draft(config: dict) -> None:
         "draft_digit_scale":        config["digit_scale"],
         "draft_pipeline":           config["pipeline"],
     }
+    
     for key, value in defaults.items():
-        st.session_state.setdefault(key, value)
+        # لایه دوم اعتبارسنجی: اگر کلید در سشن از قبل وجود دارد ولی مقدار آن غیرمجاز است، آن را ریست کن
+        if key in st.session_state:
+            current_val = st.session_state[key]
+            if key == "draft_sh_ctr" and not (3 <= current_val <= 13):
+                st.session_state[key] = value
+            elif key == "draft_blur_k" and current_val not in [1, 3, 5, 7]:
+                st.session_state[key] = value
+            elif key == "draft_thr_bs" and not (11 <= current_val <= 111):
+                st.session_state[key] = value
+            elif key == "draft_thr_c" and not (1 <= current_val <= 25):
+                st.session_state[key] = value
+            elif key == "draft_area_thr" and not (0.5 <= current_val <= 10.0):
+                st.session_state[key] = value
+            elif key == "draft_erode_kernel" and current_val not in [1, 2, 3, 4, 5]:
+                st.session_state[key] = value
+            elif key == "draft_erode_iter" and not (0 <= current_val <= 5):
+                st.session_state[key] = value
+            elif key == "draft_slice_erode_kernel" and current_val not in [1, 2, 3, 4, 5]:
+                st.session_state[key] = value
+            elif key == "draft_slice_erode_iter" and not (0 <= current_val <= 5):
+                st.session_state[key] = value
+            elif key == "draft_digit_scale" and not (10 <= current_val <= 26):
+                st.session_state[key] = value
+        else:
+            st.session_state[key] = value
 
 
 def current_preprocess_draft() -> dict:
@@ -121,6 +178,29 @@ def render_preprocess_sidebar() -> dict:
     active = applied_preprocess_config()
     init_preprocess_draft(active)
 
+    draft_combos = parse_threshold_combos(
+        st.session_state.draft_grid_combo_text, DEFAULT_GRID_THRESHOLD_COMBOS)
+    draft_labels = [threshold_combo_label(i, c) for i, c in enumerate(draft_combos)]
+
+    pending = st.session_state.pop("pending_grid_combo_selection", None)
+    if pending in draft_labels:
+        st.session_state.draft_selected_grid_combo = pending
+        pend_idx = draft_labels.index(pending)
+        st.session_state.draft_thr_bs = draft_combos[pend_idx][0]
+        st.session_state.draft_thr_c  = draft_combos[pend_idx][1]
+        st.rerun()
+
+    if st.session_state.draft_selected_grid_combo not in draft_labels:
+        st.session_state.draft_selected_grid_combo = draft_labels[0]
+
+    def _on_combo_selectbox_change():
+        chosen = st.session_state.combo_picker_selectbox
+        if chosen in draft_labels:
+            st.session_state.draft_selected_grid_combo = chosen
+            chosen_idx = draft_labels.index(chosen)
+            st.session_state.draft_thr_bs = draft_combos[chosen_idx][0]
+            st.session_state.draft_thr_c  = draft_combos[chosen_idx][1]
+
     with st.sidebar.expander("Preprocessing Parameters", expanded=True):
         st.markdown("**Sharpening**")
         st.toggle("Enable", key="draft_sh_en",
@@ -131,12 +211,6 @@ def render_preprocess_sidebar() -> dict:
             st.slider("Kernel centre value", min_value=3, max_value=13, step=2,
                       key="draft_sh_ctr",
                       help="Kernel [[0,-1,0],[-1,C,-1],[0,-1,0]]. Higher=stronger.")
-        st.markdown("---")
-        st.markdown("**Adaptive Threshold**")
-        st.select_slider("Gaussian blur kernel size", options=[1, 3, 5, 7], key="draft_blur_k")
-        st.selectbox("Threshold method", ["mean", "gaussian"], key="draft_thr_m")
-        st.slider("blocksize (odd)", min_value=11, max_value=111, step=2, key="draft_thr_bs")
-        st.slider("C (subtracted from mean)", min_value=1, max_value=25, key="draft_thr_c")
         st.markdown("---")
         st.markdown("**Cell Digit Detection**")
         st.slider("Min contour area (%)", min_value=0.5, max_value=10.0,
@@ -149,29 +223,16 @@ def render_preprocess_sidebar() -> dict:
             st.session_state.draft_grid_combo_text = format_threshold_combos(DEFAULT_GRID_THRESHOLD_COMBOS)
             st.rerun()
 
-        draft_combos = parse_threshold_combos(
-            st.session_state.draft_grid_combo_text, DEFAULT_GRID_THRESHOLD_COMBOS)
-        draft_labels = [threshold_combo_label(i, c) for i, c in enumerate(draft_combos)]
-
-        # Handle pending selection from Update/Remove buttons
-        pending = st.session_state.pop("pending_grid_combo_selection", None)
-        if pending in draft_labels:
-            st.session_state.draft_selected_grid_combo = pending
-        if st.session_state.draft_selected_grid_combo not in draft_labels:
-            st.session_state.draft_selected_grid_combo = draft_labels[0]
-
-        # Direct combo selector — always visible, instant pick
         cur_sel = st.session_state.draft_selected_grid_combo
         cur_idx = draft_labels.index(cur_sel) if cur_sel in draft_labels else 0
-        chosen = st.selectbox(
+        st.selectbox(
             "Active combo (used in single-combo mode)",
             draft_labels,
             index=cur_idx,
             key="combo_picker_selectbox",
+            on_change=_on_combo_selectbox_change,
             help="Pick which combo is used when grid loop is OFF.",
         )
-        if chosen != cur_sel:
-            st.session_state.draft_selected_grid_combo = chosen
 
         with st.expander("Edit / add combos", expanded=False):
             for idx, (combo_bs, combo_c) in enumerate(draft_combos):
