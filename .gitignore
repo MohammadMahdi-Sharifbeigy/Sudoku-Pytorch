@@ -28,6 +28,9 @@ Thumbs.db
 #codegrapg
 .codegraph/
 
-debug_outputs/  
+debug_outputs/
+
+# Generated training-run plots / metadata
+runs/
 
 docs/

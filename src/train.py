@@ -1,4 +1,5 @@
 import sys
+import time
 
 import torch
 from tqdm.auto import tqdm
@@ -217,14 +218,18 @@ def run_twophase_training(
     BN remains frozen in both phases (correct for ImageNet-pretrained transfer).
 
     on_epoch_end(epoch_idx, phase, train_loss, train_acc, val_loss, val_acc) called each epoch.
-    Returns: (history dict, best_val_loss).
+    Returns: (history dict, best_val_loss, phase_boundaries).
+    phase_boundaries is a list of 1-based epoch indices marking phase
+    transitions (used to draw dashed lines on the saved LR-schedule plot).
     """
     import copy
     import torch.optim as optim
 
-    history = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': [], 'Phase': []}
+    history = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': [],
+               'Phase': [], 'LR': [], 'Epoch Time': []}
     best_val_loss = float('inf')
     best_state = None
+    phase_boundaries = []  # 1-based epoch indices where a phase transition occurs
 
     def _run_phase(phase_label, n_epochs, lr):
         nonlocal best_val_loss, best_state
@@ -240,10 +245,13 @@ def run_twophase_training(
             model.train()
             model._freeze_batchnorm()
 
+            t0 = time.time()
             t_loss, t_acc = train_epoch(model, train_loader, criterion, optimizer, device,
                                         should_stop=should_stop)
             v_loss, v_acc = validate(model, val_loader, criterion, device,
                                      should_stop=should_stop)
+            elapsed = time.time() - t0
+            lr_now  = optimizer.param_groups[0]['lr']
             scheduler.step()
 
             history['Train Loss'].append(t_loss)
@@ -251,6 +259,8 @@ def run_twophase_training(
             history['Train Acc'].append(t_acc)
             history['Val Acc'].append(v_acc)
             history['Phase'].append(phase_label)
+            history['LR'].append(lr_now)
+            history['Epoch Time'].append(elapsed)
 
             if v_loss < best_val_loss:
                 best_val_loss = v_loss
@@ -264,6 +274,7 @@ def run_twophase_training(
 
     model.freeze_backbone()
     _run_phase("head-only", epochs_phase1, lr_phase1)
+    phase_boundaries.append(len(history['Train Loss']))
 
     model.unfreeze_last_blocks(n=unfreeze_blocks)
     _run_phase("fine-tune", epochs_phase2, lr_phase2)
@@ -271,4 +282,4 @@ def run_twophase_training(
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    return history, best_val_loss
+    return history, best_val_loss, phase_boundaries

@@ -141,7 +141,8 @@ def _train_loop(
     """Generic single-task epoch loop. Returns (history, best_val_loss)."""
     best_val_loss = float('inf')
     best_state    = None
-    history = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': []}
+    history = {'Train Loss': [], 'Val Loss': [], 'Train Acc': [], 'Val Acc': [],
+               'LR': [], 'Epoch Time': []}
 
     from src.train import train_epoch, validate
 
@@ -166,6 +167,8 @@ def _train_loop(
         history['Val Loss'].append(v_loss)
         history['Train Acc'].append(t_acc)
         history['Val Acc'].append(v_acc)
+        history['LR'].append(lr_now)
+        history['Epoch Time'].append(elapsed)
 
         if v_loss < best_val_loss:
             best_val_loss = v_loss
@@ -203,6 +206,9 @@ def _run_singletask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
     )
     from src.train import validate, collect_predictions
     from src.report_utils import save_training_report
+    from src.plot_utils import (
+        make_run_dir, generate_training_plots, build_class_names, save_run_metadata,
+    )
 
     ModelCls = LegacyDigitCNN if cfg.model_choice == "LegacyDigitCNN" else DigitCNN
 
@@ -246,6 +252,15 @@ def _run_singletask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
         output_path=report_path,
     )
 
+    run_dir = make_run_dir(model_tag=f"{cfg.model_choice}_{label}", epochs=cfg.epochs,
+                           batch_size=cfg.batch_size, lr=cfg.learning_rate,
+                           weight_decay=cfg.weight_decay)
+    class_names = build_class_names(sorted(set(y_true) | set(y_pred)))
+    plot_paths = generate_training_plots(history=history, y_true=y_true, y_pred=y_pred,
+                                         class_names=class_names, run_dir=run_dir)
+    save_run_metadata(run_dir, {"config": vars(cfg), "test_acc": t_acc,
+                                "test_loss": t_loss, "best_val_loss": best_val_loss})
+
     return {
         'type': 'done', 'model_type': 'singletask', 'label': label,
         'save_path': save_path, 'report_path': rpt,
@@ -253,6 +268,7 @@ def _run_singletask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
         'y_true': y_true, 'y_pred': y_pred,
         'history': history, 'best_val_loss': best_val_loss,
         'model': model, 'test_loader': test_loader, 'criterion': criterion,
+        'plots_dir': run_dir, 'plot_paths': plot_paths,
     }
 
 
@@ -264,6 +280,9 @@ def _run_lang_specific(cfg: TrainingConfig, device, on_epoch, stop_event, is_per
     )
     from src.train import validate, collect_predictions
     from src.report_utils import save_training_report
+    from src.plot_utils import (
+        make_run_dir, generate_training_plots, build_class_names, save_run_metadata,
+    )
 
     ModelCls = LegacyDigitCNN if cfg.model_choice == "LegacyDigitCNN" else DigitCNN
 
@@ -307,6 +326,15 @@ def _run_lang_specific(cfg: TrainingConfig, device, on_epoch, stop_event, is_per
         output_path=report_path,
     )
 
+    run_dir = make_run_dir(model_tag=f"{cfg.model_choice}_{lang_label}", epochs=cfg.epochs,
+                           batch_size=cfg.batch_size, lr=cfg.learning_rate,
+                           weight_decay=cfg.weight_decay)
+    class_names = build_class_names(sorted(set(y_true) | set(y_pred)))
+    plot_paths = generate_training_plots(history=history, y_true=y_true, y_pred=y_pred,
+                                         class_names=class_names, run_dir=run_dir)
+    save_run_metadata(run_dir, {"config": vars(cfg), "test_acc": t_acc,
+                                "test_loss": t_loss, "best_val_loss": best_val_loss})
+
     return {
         'type': 'done', 'model_type': 'lang_specific', 'label': lang_label,
         'save_path': save_path, 'report_path': rpt,
@@ -314,6 +342,7 @@ def _run_lang_specific(cfg: TrainingConfig, device, on_epoch, stop_event, is_per
         'y_true': y_true, 'y_pred': y_pred,
         'history': history, 'best_val_loss': best_val_loss,
         'model': model, 'test_loader': test_loader, 'criterion': criterion,
+        'plots_dir': run_dir, 'plot_paths': plot_paths,
     }
 
 
@@ -324,6 +353,9 @@ def _run_multitask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
         train_epoch_multitask, validate_multitask, collect_predictions_multitask,
     )
     from src.report_utils import save_training_report_multitask
+    from src.plot_utils import (
+        make_run_dir, generate_training_plots, build_class_names, save_run_metadata,
+    )
 
     train_loader, val_loader, test_loader, balance_info, lang_weights = \
         get_dataloaders_multitask(cfg.data_path, batch_size=cfg.batch_size)
@@ -346,6 +378,7 @@ def _run_multitask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
         'Train Lang Acc':  [], 'Val Lang Acc':  [],
         'Train Digit Loss': [], 'Train Lang Loss': [],
         'Val Digit Loss':   [], 'Val Lang Loss':   [],
+        'LR': [], 'Epoch Time': [],
     }
 
     for epoch in range(cfg.epochs):
@@ -372,6 +405,8 @@ def _run_multitask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
             ('Train Lang Loss', t_l_loss), ('Val Lang Loss', v_l_loss),
         ]:
             history[k].append(v)
+        history['LR'].append(lr_now)
+        history['Epoch Time'].append(elapsed)
 
         if v_loss < best_val_loss:
             best_val_loss = v_loss
@@ -413,6 +448,17 @@ def _run_multitask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
         output_path="models/training_report_multitask.txt",
     )
 
+    run_dir = make_run_dir(model_tag="MultiTaskCNN", epochs=cfg.epochs,
+                           batch_size=cfg.batch_size, lr=cfg.learning_rate,
+                           weight_decay=cfg.weight_decay)
+    class_names = build_class_names(sorted(set(d_true) | set(d_pred)))
+    plot_paths = generate_training_plots(
+        history=history, y_true=d_true, y_pred=d_pred, class_names=class_names,
+        run_dir=run_dir, lang_true=l_true, lang_pred=l_pred,
+        lang_class_names=['Persian', 'English'])
+    save_run_metadata(run_dir, {"config": vars(cfg), "test_digit_acc": t_d_acc,
+                                "test_lang_acc": t_l_acc, "best_val_loss": best_val_loss})
+
     return {
         'type': 'done', 'model_type': 'multitask', 'label': 'MultiTask',
         'save_path': save_path, 'report_path': rpt,
@@ -421,6 +467,7 @@ def _run_multitask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
         'history': history, 'best_val_loss': best_val_loss,
         'model': model, 'test_loader': test_loader, 'criterion': criterion,
         'balance_info': balance_info,
+        'plots_dir': run_dir, 'plot_paths': plot_paths,
     }
 
 
@@ -429,6 +476,9 @@ def _run_unified(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
     from src.data_utils import get_dataloaders_unified20
     from src.train import validate, collect_predictions
     from src.report_utils import save_training_report
+    from src.plot_utils import (
+        make_run_dir, generate_training_plots, build_class_names, save_run_metadata,
+    )
 
     train_loader, val_loader, test_loader = get_dataloaders_unified20(
         cfg.data_path, batch_size=cfg.batch_size)
@@ -463,6 +513,15 @@ def _run_unified(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
         output_path="models/training_report_unified20.txt",
     )
 
+    run_dir = make_run_dir(model_tag=f"UnifiedCNN_{cfg.unified_backbone}", epochs=cfg.epochs,
+                           batch_size=cfg.batch_size, lr=cfg.learning_rate,
+                           weight_decay=cfg.weight_decay)
+    class_names = build_class_names(sorted(set(y_true) | set(y_pred)), unified=True)
+    plot_paths = generate_training_plots(history=history, y_true=y_true, y_pred=y_pred,
+                                         class_names=class_names, run_dir=run_dir)
+    save_run_metadata(run_dir, {"config": vars(cfg), "test_acc": t_acc,
+                                "test_loss": t_loss, "best_val_loss": best_val_loss})
+
     return {
         'type': 'done', 'model_type': 'unified', 'label': 'Unified20',
         'save_path': save_path, 'report_path': rpt,
@@ -471,6 +530,7 @@ def _run_unified(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
         'history': history, 'best_val_loss': best_val_loss,
         'model': model, 'test_loader': test_loader, 'criterion': criterion,
         'decode_fn': decode_unified_class,
+        'plots_dir': run_dir, 'plot_paths': plot_paths,
     }
 
 
@@ -479,6 +539,9 @@ def _run_efficientnet(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict
     from src.data_utils import get_dataloaders_efficientnet
     from src.train import run_twophase_training, validate, collect_predictions
     from src.report_utils import save_training_report
+    from src.plot_utils import (
+        make_run_dir, generate_training_plots, build_class_names, save_run_metadata,
+    )
 
     dataset_mode_map = {
         "MNIST Only": "mnist_only", "MNIST + Fonts": "mnist_fonts",
@@ -515,7 +578,7 @@ def _run_efficientnet(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict
                 'elapsed_s':  0.0,
             })
 
-    history, best_val_loss = run_twophase_training(
+    history, best_val_loss, phase_boundaries = run_twophase_training(
         model, train_loader, val_loader, criterion, device,
         epochs_phase1=cfg.eff_phase1_epochs,
         epochs_phase2=cfg.eff_phase2_epochs,
@@ -540,6 +603,17 @@ def _run_efficientnet(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict
         output_path=f"models/training_report_efficientnet_{cfg.purpose.lower()}.txt",
     )
 
+    run_dir = make_run_dir(model_tag=f"EfficientNetDigit_{cfg.purpose}", epochs=total_epochs,
+                           batch_size=cfg.batch_size, lr=cfg.learning_rate,
+                           weight_decay=cfg.weight_decay)
+    class_names = build_class_names(sorted(set(y_true) | set(y_pred)))
+    plot_paths = generate_training_plots(history=history, y_true=y_true, y_pred=y_pred,
+                                         class_names=class_names, run_dir=run_dir,
+                                         phase_boundaries=phase_boundaries)
+    save_run_metadata(run_dir, {"config": vars(cfg), "test_acc": t_acc,
+                                "test_loss": t_loss, "best_val_loss": best_val_loss,
+                                "phase_boundaries": phase_boundaries})
+
     return {
         'type': 'done', 'model_type': 'efficientnet', 'label': f'EfficientNet-{cfg.purpose}',
         'save_path': save_path, 'report_path': rpt,
@@ -547,6 +621,7 @@ def _run_efficientnet(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict
         'y_true': y_true, 'y_pred': y_pred,
         'history': history, 'best_val_loss': best_val_loss,
         'model': model, 'test_loader': test_loader, 'criterion': criterion,
+        'plots_dir': run_dir, 'plot_paths': plot_paths,
     }
 
 

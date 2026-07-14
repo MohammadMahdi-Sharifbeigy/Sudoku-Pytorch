@@ -159,14 +159,27 @@ def main():
 
     epoch_bar.close()
     print("─" * 72)
-    print(f"Done. Model saved → {result.get('save_path', '?')}")
-    if 'test_acc' in result:
-        print(f"Test accuracy : {result['test_acc']:.2f}%")
-    if 'test_digit_acc' in result:
-        print(f"Test digit acc: {result['test_digit_acc']:.2f}%  "
-              f"lang acc: {result.get('test_lang_acc', 0):.2f}%")
-    if 'report_path' in result:
-        print(f"Report        → {result['report_path']}")
+
+    def _print_result(r, indent=""):
+        print(f"{indent}Model saved   → {r.get('save_path', '?')}")
+        if 'test_acc' in r:
+            print(f"{indent}Test accuracy : {r['test_acc']:.2f}%")
+        if 'test_digit_acc' in r:
+            print(f"{indent}Test digit acc: {r['test_digit_acc']:.2f}%  "
+                  f"lang acc: {r.get('test_lang_acc', 0):.2f}%")
+        if 'report_path' in r:
+            print(f"{indent}Report        → {r['report_path']}")
+        if 'plots_dir' in r:
+            print(f"{indent}Plots         → {r['plots_dir']}")
+
+    if result.get('model_type') == 'separate':
+        print("Persian model:")
+        _print_result(result.get('persian', {}), indent="  ")
+        print("English model:")
+        _print_result(result.get('english', {}), indent="  ")
+    else:
+        print("Done.")
+        _print_result(result)
 
 
 if __name__ == "__main__":

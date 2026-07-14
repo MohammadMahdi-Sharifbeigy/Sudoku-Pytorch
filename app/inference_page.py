@@ -1,6 +1,7 @@
 """Mode 1 — Inference (Solve Sudoku)."""
 import copy
 import os
+import time
 
 import cv2
 import matplotlib.pyplot as plt
@@ -45,7 +46,7 @@ def vision_get_cells(**kwargs):
     )
 
 from app.cancel import RunCancelled, clear_cancel, raise_if_cancelled, render_stop_button
-from app.debug_utils import save_debug_outputs
+from app.debug_utils import save_debug_outputs, save_timing
 from app.onnx_wrapper import OnnxInferenceSession, DigitOnlyModelWrapper, UnifiedDigitOnlyWrapper
 from app.preprocess_config import (
     DEFAULT_GRID_THRESHOLD_COMBOS, PREPROCESS_DEFAULTS,
@@ -393,6 +394,7 @@ def render_inference_page(device: torch.device) -> None:
             uploaded_file = None
 
         if uploaded_file is not None:
+            t_upload = time.perf_counter()
             image_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
             img = cv2.imdecode(image_bytes, cv2.IMREAD_COLOR)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -481,6 +483,8 @@ def render_inference_page(device: torch.device) -> None:
                     if cells_orig is None:
                         raise Exception(f"Grid extraction failed: {err_orig}")
 
+                    t_extracted = time.perf_counter()
+
                     with st.expander("Grid Extraction Preview", expanded=True):
                         count_orig  = sum(c['contains_digit'] for c in cells_orig)
                         cells       = cells_orig
@@ -522,8 +526,18 @@ def render_inference_page(device: torch.device) -> None:
                     grid_array  = get_predicted_sudoku_grid_torch(
                         vision_model, cells, device,
                         should_stop=lambda: raise_if_cancelled("inference"))
+                    t_predicted = time.perf_counter()
                     solver      = SudokuSolver(board=copy.deepcopy(grid_array))
                     solved_board = solver.board if solver.solve() else None
+                    t_solved    = time.perf_counter()
+
+                    timing = {
+                        "extraction_s": t_extracted - t_upload,
+                        "prediction_s": t_predicted - t_extracted,
+                        "solve_s":      t_solved - t_predicted,
+                        "total_s":      t_solved - t_upload,
+                    }
+                    save_timing(debug_dir, timing)
 
                     os.makedirs('models', exist_ok=True)
                     inf_report_path = save_inference_report(
@@ -531,6 +545,7 @@ def render_inference_page(device: torch.device) -> None:
                         cells=cells, per_cell_info=per_cell,
                         grid_array=grid_array, solved_board=solved_board,
                         output_path=f'models/reports/inference_report_{uploaded_file.name}.txt',
+                        timing=timing,
                     )
                     st.sidebar.success(f"Inference report → `{inf_report_path}`")
 
@@ -556,6 +571,14 @@ def render_inference_page(device: torch.device) -> None:
                         st.error("Grid is invalid or unsolvable. Ensure the image is clear.")
                         st.markdown("**Extracted Grid (before solving):**")
                         st.dataframe(pd.DataFrame(grid_array), width='stretch')
+
+                    st.caption(
+                        f"⏱ Total pipeline time: {timing['total_s']*1000:.0f} ms  "
+                        f"(extraction {timing['extraction_s']*1000:.0f} ms · "
+                        f"prediction {timing['prediction_s']*1000:.0f} ms · "
+                        f"solve {timing['solve_s']*1000:.0f} ms)  —  saved to "
+                        f"`{os.path.join(debug_dir, 'timing.json')}`"
+                    )
 
                 except RunCancelled as e:
                     st.warning(str(e))

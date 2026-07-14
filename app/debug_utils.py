@@ -60,3 +60,20 @@ def save_debug_outputs(
         json.dump(summary, f, indent=2)
 
     return out_dir
+
+
+def save_timing(debug_dir: str, timing: dict) -> str:
+    """Write the inference pipeline timing breakdown to timing.json.
+
+    timing is expected to hold per-stage seconds (extraction_s, prediction_s,
+    solve_s, total_s). A wall-clock ISO timestamp is added. Returns the path.
+    Useful for judging web/edge deploy latency of the full pipeline.
+    """
+    os.makedirs(debug_dir, exist_ok=True)
+    payload = dict(timing)
+    payload["recorded_at"] = datetime.now().isoformat(timespec="seconds")
+    payload["total_ms"]    = round(timing.get("total_s", 0.0) * 1000, 1)
+    path = os.path.join(debug_dir, "timing.json")
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    return path

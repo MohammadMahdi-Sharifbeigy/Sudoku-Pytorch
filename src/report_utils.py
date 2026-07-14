@@ -332,11 +332,14 @@ def save_inference_report(
     grid_array,
     solved_board,
     output_path="models/inference_report.txt",
+    timing=None,
 ):
     """Write a per-cell extraction + prediction report.
     per_cell_info items: {'label','confidence','has_digit'} plus optional
     'lang_label' (0=Persian,1=English) and 'lang_confidence' when a
     multi-task model was used.
+    timing: optional dict with per-stage seconds (extraction_s, prediction_s,
+    solve_s, total_s) — appended as a Pipeline Timing section when provided.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -430,6 +433,15 @@ def save_inference_report(
                     f"    Cell {idx+1:2d} (row {r}, col {c})"
                     f"  predicted={info['label']}  conf={info['confidence']*100:.1f}%"
                 )
+
+    if timing is not None:
+        lines.append(_section("Pipeline Timing  [deploy latency]"))
+        _fmt = lambda s: f"{s*1000:8.1f} ms  ({s:.3f} s)"
+        lines.append(f"  Grid extraction : {_fmt(timing.get('extraction_s', 0.0))}")
+        lines.append(f"  Digit prediction: {_fmt(timing.get('prediction_s', 0.0))}")
+        lines.append(f"  Solving         : {_fmt(timing.get('solve_s', 0.0))}")
+        lines.append("  " + _separator("-", 44))
+        lines.append(f"  Total (upload→solve): {_fmt(timing.get('total_s', 0.0))}")
 
     lines.append("\n" + _separator("="))
     lines.append("  END OF REPORT")

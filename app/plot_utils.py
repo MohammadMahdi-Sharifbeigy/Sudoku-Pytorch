@@ -1,13 +1,16 @@
-"""Dark-themed Matplotlib plot helpers for the Streamlit UI."""
-import json
-import os
-from datetime import datetime
+"""Dark-themed Matplotlib plot helpers for the Streamlit UI (live previews).
 
+make_run_dir / save_fig / save_run_metadata live in src/plot_utils.py (the
+paper-style saved-plot module, shared with the Streamlit-free CLI) and are
+re-exported here so existing imports of this module keep working.
+"""
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import confusion_matrix
+
+from src.plot_utils import make_run_dir, save_fig, save_run_metadata  # noqa: F401
 
 _BG_FIG  = '#0e1117'
 _BG_AX   = '#1a1a2e'

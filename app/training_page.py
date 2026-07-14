@@ -482,6 +482,44 @@ def _render_done(device: torch.device) -> None:
         with pc2:
             _draw_cm(eng.get('y_true', []), eng.get('y_pred', []), "English")
 
+    # ── Saved paper-style plots ─────────────────────────────────────────────────
+    def _show_plots(r, heading=None):
+        plot_paths = r.get('plot_paths')
+        if not plot_paths:
+            return
+        if heading:
+            st.markdown(f"#### {heading}")
+        st.caption(f"Saved to `{r.get('plots_dir', '')}`")
+        cols = st.columns(2)
+        labels = {
+            'learning_curve':        'Learning Curve',
+            'training_history':      'Training History',
+            'confusion_matrix':      'Confusion Matrix',
+            'confusion_matrix_lang': 'Language Confusion Matrix',
+            'lr_schedule':           'LR Schedule',
+        }
+        for i, (key, path) in enumerate(plot_paths.items()):
+            if key == 'history_csv' or not os.path.exists(path):
+                continue
+            with cols[i % 2]:
+                st.image(path, caption=labels.get(key, key), width='stretch')
+        if 'history_csv' in plot_paths and os.path.exists(plot_paths['history_csv']):
+            with open(plot_paths['history_csv'], 'r', encoding='utf-8') as f:
+                st.download_button("⬇ Download history.csv", f.read(),
+                                   os.path.basename(plot_paths['history_csv']), 'text/csv',
+                                   key=f"dl_csv_{r.get('plots_dir', heading or '')}")
+
+    st.markdown("---")
+    st.markdown("### Saved Plots (paper style)")
+    if model_type == "separate":
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            _show_plots(result.get('persian', {}), heading="Persian")
+        with pc2:
+            _show_plots(result.get('english', {}), heading="English")
+    else:
+        _show_plots(result)
+
     # ── Download report ───────────────────────────────────────────────────────
     st.markdown("---")
     for rpt_key in ('report_path',):
