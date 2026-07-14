@@ -1,4 +1,7 @@
+import sys
+
 import torch
+from tqdm.auto import tqdm
 
 
 def _check_stop(should_stop):
@@ -6,29 +9,40 @@ def _check_stop(should_stop):
         should_stop()
 
 
+def _is_tty() -> bool:
+    """True when stdout is an interactive terminal (CLI), False in Streamlit/notebook."""
+    return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+
 def train_epoch(model, train_loader, criterion, optimizer, device, should_stop=None):
     model.train()
     total_loss = 0.0
     correct = 0
     total = 0
-    
-    for batch_idx, (data, target) in enumerate(train_loader):
+
+    loader = tqdm(train_loader, desc="  train", leave=False,
+                  disable=not _is_tty(), ncols=80, unit="batch")
+
+    for data, target in loader:
         _check_stop(should_stop)
         data, target = data.to(device), target.to(device)
-        
+
         optimizer.zero_grad()
         outputs = model(data)
         loss = criterion(outputs, target)
-        
         loss.backward()
         optimizer.step()
-        
+
         total_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
-        total += target.size(0)
+        total   += target.size(0)
         correct += (predicted == target).sum().item()
+
+        loader.set_postfix(loss=f"{loss.item():.4f}",
+                           acc=f"{100*correct/max(total,1):.1f}%",
+                           refresh=False)
         _check_stop(should_stop)
-        
+
     return total_loss / len(train_loader), 100 * correct / total
 
 def validate(model, val_loader, criterion, device, should_stop=None):

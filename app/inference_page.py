@@ -191,17 +191,17 @@ def _render_debug_steps(img, img_original, enable_sharpen, use_nlm, sharpen_cent
         with c2b:
             st.caption(f"Selected: `{selected_grid_combo_label}` | Mode: `{grid_combo_mode}`")
 
-        st.markdown("#### Step 2b — All Threshold Combos")
-        for _idx in range(0, len(grid_threshold_combos), 2):
-            _cols = st.columns(2)
-            for _off, (_col, (_bs, _c)) in enumerate(
-                    zip(_cols, grid_threshold_combos[_idx:_idx + 2])):
-                _t = apply_grayscale_blur_and_threshold(img, blocksize=_bs, c=_c, blur_k=blur_k)
-                with _col:
-                    _sel  = (_bs, _c) == selected_grid_combo
-                    _lbl  = threshold_combo_label(_idx + _off, (_bs, _c))
-                    st.markdown(f"**{'Selected - ' if _sel else ''}{_lbl}**")
-                    st.image(_t, width='stretch', channels="GRAY")
+        with st.expander("Step 2b — All Threshold Combos (click to expand)", expanded=False):
+            for _idx in range(0, len(grid_threshold_combos), 2):
+                _cols = st.columns(2)
+                for _off, (_col, (_bs, _c)) in enumerate(
+                        zip(_cols, grid_threshold_combos[_idx:_idx + 2])):
+                    _t = apply_grayscale_blur_and_threshold(img, blocksize=_bs, c=_c, blur_k=blur_k)
+                    with _col:
+                        _sel  = (_bs, _c) == selected_grid_combo
+                        _lbl  = threshold_combo_label(_idx + _off, (_bs, _c))
+                        st.markdown(f"**{'Selected - ' if _sel else ''}{_lbl}**")
+                        st.image(_t, width='stretch', channels="GRAY")
         st.markdown("---")
 
         st.markdown("#### Step 3 — Perspective Transform")

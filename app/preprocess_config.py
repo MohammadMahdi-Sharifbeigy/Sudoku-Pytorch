@@ -41,7 +41,7 @@ def threshold_combos_to_frame(combos) -> pd.DataFrame:
 
 PREPROCESS_DEFAULTS = {
     "enable_sharpen":          True,
-    "use_nlm":                 False,
+    "use_nlm":                 True,
     "sharpen_center":          5,
     "blur_k":                  3,
     "thresh_method":           "mean",
@@ -153,69 +153,84 @@ def render_preprocess_sidebar() -> dict:
             st.session_state.draft_grid_combo_text, DEFAULT_GRID_THRESHOLD_COMBOS)
         draft_labels = [threshold_combo_label(i, c) for i, c in enumerate(draft_combos)]
 
+        # Handle pending selection from Update/Remove buttons
         pending = st.session_state.pop("pending_grid_combo_selection", None)
         if pending in draft_labels:
             st.session_state.draft_selected_grid_combo = pending
         if st.session_state.draft_selected_grid_combo not in draft_labels:
             st.session_state.draft_selected_grid_combo = draft_labels[0]
 
-        for idx, (combo_bs, combo_c) in enumerate(draft_combos):
-            st.markdown(f"**Combo {idx + 1}**")
-            c1, c2 = st.columns(2)
-            with c1:
-                row_bs = st.number_input(
-                    f"Combo {idx + 1} blocksize", min_value=3, max_value=301,
-                    value=int(combo_bs), step=2,
-                    key=f"grid_combo_bs_{idx}_{combo_bs}_{combo_c}")
-            with c2:
-                row_c = st.number_input(
-                    f"Combo {idx + 1} C", min_value=0, max_value=100,
-                    value=int(combo_c), step=1,
-                    key=f"grid_combo_c_{idx}_{combo_bs}_{combo_c}")
-            row_bs = int(row_bs); row_c = int(row_c)
-            if row_bs % 2 == 0:
-                row_bs += 1
-            a1, a2 = st.columns(2)
-            with a1:
-                if st.button(f"Update combo {idx + 1}", width="stretch",
-                             key=f"update_grid_combo_{idx}"):
-                    draft_combos[idx] = (row_bs, row_c)
-                    st.session_state.draft_grid_combo_text = format_threshold_combos(draft_combos)
-                    st.session_state.pending_grid_combo_selection = threshold_combo_label(
-                        idx, draft_combos[idx])
-                    st.rerun()
-            with a2:
-                if st.button(f"Remove combo {idx + 1}", width="stretch",
-                             key=f"remove_grid_combo_{idx}",
-                             disabled=len(draft_combos) <= 1):
-                    draft_combos.pop(idx)
-                    st.session_state.draft_grid_combo_text = format_threshold_combos(draft_combos)
-                    new_idx = min(idx, len(draft_combos) - 1)
-                    st.session_state.pending_grid_combo_selection = threshold_combo_label(
-                        new_idx, draft_combos[new_idx])
-                    st.rerun()
+        # Direct combo selector — always visible, instant pick
+        cur_sel = st.session_state.draft_selected_grid_combo
+        cur_idx = draft_labels.index(cur_sel) if cur_sel in draft_labels else 0
+        chosen = st.selectbox(
+            "Active combo (used in single-combo mode)",
+            draft_labels,
+            index=cur_idx,
+            key="combo_picker_selectbox",
+            help="Pick which combo is used when grid loop is OFF.",
+        )
+        if chosen != cur_sel:
+            st.session_state.draft_selected_grid_combo = chosen
 
-        st.markdown("**Add New Combo**")
-        na1, na2 = st.columns(2)
-        with na1:
-            new_bs = st.number_input("New blocksize", min_value=3, max_value=301,
-                                     value=41, step=2, key="new_combo_bs")
-        with na2:
-            new_c = st.number_input("New C", min_value=0, max_value=100,
-                                    value=8, step=1, key="new_combo_c")
-        if st.button("Add combo", width="stretch", key="add_combo_btn"):
-            new_bs = int(new_bs)
-            if new_bs % 2 == 0:
-                new_bs += 1
-            draft_combos.append((new_bs, int(new_c)))
-            st.session_state.draft_grid_combo_text = format_threshold_combos(draft_combos)
-            st.rerun()
+        with st.expander("Edit / add combos", expanded=False):
+            for idx, (combo_bs, combo_c) in enumerate(draft_combos):
+                st.markdown(f"**Combo {idx + 1}**")
+                c1, c2 = st.columns(2)
+                with c1:
+                    row_bs = st.number_input(
+                        f"Combo {idx + 1} blocksize", min_value=3, max_value=301,
+                        value=int(combo_bs), step=2,
+                        key=f"grid_combo_bs_{idx}_{combo_bs}_{combo_c}")
+                with c2:
+                    row_c = st.number_input(
+                        f"Combo {idx + 1} C", min_value=0, max_value=100,
+                        value=int(combo_c), step=1,
+                        key=f"grid_combo_c_{idx}_{combo_bs}_{combo_c}")
+                row_bs = int(row_bs); row_c = int(row_c)
+                if row_bs % 2 == 0:
+                    row_bs += 1
+                a1, a2 = st.columns(2)
+                with a1:
+                    if st.button(f"Update combo {idx + 1}", use_container_width=True,
+                                 key=f"update_grid_combo_{idx}"):
+                        draft_combos[idx] = (row_bs, row_c)
+                        st.session_state.draft_grid_combo_text = format_threshold_combos(draft_combos)
+                        st.session_state.pending_grid_combo_selection = threshold_combo_label(
+                            idx, draft_combos[idx])
+                        st.rerun()
+                with a2:
+                    if st.button(f"Remove combo {idx + 1}", use_container_width=True,
+                                 key=f"remove_grid_combo_{idx}",
+                                 disabled=len(draft_combos) <= 1):
+                        draft_combos.pop(idx)
+                        st.session_state.draft_grid_combo_text = format_threshold_combos(draft_combos)
+                        new_idx = min(idx, len(draft_combos) - 1)
+                        st.session_state.pending_grid_combo_selection = threshold_combo_label(
+                            new_idx, draft_combos[new_idx])
+                        st.rerun()
+
+            st.markdown("**Add New Combo**")
+            na1, na2 = st.columns(2)
+            with na1:
+                new_bs = st.number_input("New blocksize", min_value=3, max_value=301,
+                                         value=41, step=2, key="new_combo_bs")
+            with na2:
+                new_c = st.number_input("New C", min_value=0, max_value=100,
+                                        value=8, step=1, key="new_combo_c")
+            if st.button("Add combo", use_container_width=True, key="add_combo_btn"):
+                new_bs = int(new_bs)
+                if new_bs % 2 == 0:
+                    new_bs += 1
+                draft_combos.append((new_bs, int(new_c)))
+                st.session_state.draft_grid_combo_text = format_threshold_combos(draft_combos)
+                st.rerun()
 
         st.markdown("---")
         st.markdown("**Grid Loop Mode**")
         _loop_on = st.toggle(
             "Try all threshold combos (grid loop)",
-            value=(st.session_state.get("draft_grid_combo_mode", config["grid_combo_mode"])
+            value=(st.session_state.get("draft_grid_combo_mode", active["grid_combo_mode"])
                    == "Auto loop all combos"),
             key="draft_grid_loop_toggle",
             help=(

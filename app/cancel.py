@@ -1,5 +1,5 @@
-"""Cancellation helpers for long-running Streamlit operations."""
-import os
+"""Cancellation helpers. Uses threading.Event for instant, thread-safe stop."""
+import threading
 from datetime import datetime
 
 import streamlit as st
@@ -9,27 +9,34 @@ class RunCancelled(Exception):
     pass
 
 
-def _flag_path(scope: str) -> str:
-    return os.path.join(os.getcwd(), f".cancel_{scope}")
+# Per-scope stop events (live as long as the process)
+_STOP_EVENTS: dict[str, threading.Event] = {}
+
+
+def get_stop_event(scope: str) -> threading.Event:
+    if scope not in _STOP_EVENTS:
+        _STOP_EVENTS[scope] = threading.Event()
+    return _STOP_EVENTS[scope]
 
 
 def request_cancel(scope: str) -> None:
-    with open(_flag_path(scope), "w", encoding="utf-8") as f:
-        f.write(datetime.now().isoformat())
+    get_stop_event(scope).set()
 
 
 def clear_cancel(scope: str) -> None:
-    path = _flag_path(scope)
-    if os.path.exists(path):
-        os.remove(path)
+    get_stop_event(scope).clear()
 
 
 def raise_if_cancelled(scope: str) -> None:
-    if os.path.exists(_flag_path(scope)):
+    if get_stop_event(scope).is_set():
         raise RunCancelled(f"{scope.title()} stopped by user.")
 
 
+def is_cancelled(scope: str) -> bool:
+    return get_stop_event(scope).is_set()
+
+
 def render_stop_button(scope: str, label: str) -> None:
-    if st.sidebar.button(label, type="secondary", width="stretch", key=f"stop_{scope}_button"):
+    if st.sidebar.button(label, type="secondary", use_container_width=True, key=f"stop_{scope}_button"):
         request_cancel(scope)
-        st.sidebar.warning(f"Stop requested for {scope}.")
+        st.sidebar.warning("Stop requested.")
