@@ -7,6 +7,7 @@ import torch
 
 from src.model import (
     DigitCNN, MultiTaskDigitCNN, UnifiedDigitCNN, UNIFIED_NUM_CLASSES,
+    load_digit_cnn_checkpoint,
 )
 from src.optimize_model import run_optimization_and_benchmark, run_optimization_and_benchmark_multitask
 from app.cancel import RunCancelled, clear_cancel, raise_if_cancelled, render_stop_button
@@ -53,9 +54,14 @@ def render_optimization_page(device: torch.device) -> None:
             raise_if_cancelled("optimization")
 
         if opt_type == "single":
-            model = DigitCNN(num_classes=10)
-            model.load_state_dict(torch.load(opt_pt_path, map_location=cpu_device))
-            model.to(cpu_device).eval()
+            model, arch_used = load_digit_cnn_checkpoint(opt_pt_path, cpu_device, num_classes=10)
+            if arch_used == 'LegacyDigitCNN':
+                st.info(
+                    "This checkpoint was saved with the old 2-conv architecture "
+                    "(pre-BatchNorm redesign). Loaded via `LegacyDigitCNN` — "
+                    "exports below still work, but consider retraining with the "
+                    "current `DigitCNN` for better accuracy."
+                )
             results = run_optimization_and_benchmark(
                 model, opt_pt_path, cpu_device,
                 output_prefix=opt_prefix,

@@ -18,7 +18,7 @@ from src.train_runner import TrainingConfig, run_training, RunCancelled
 def main():
     parser = argparse.ArgumentParser(description="Sudoku digit model training (no Streamlit)")
     parser.add_argument("--model",    default="DigitCNN",
-                        choices=["DigitCNN", "MultiTaskCNN",
+                        choices=["DigitCNN", "LegacyDigitCNN", "MultiTaskCNN",
                                  "UnifiedCNN — MobileNetV3", "UnifiedCNN — ShuffleNetV2",
                                  "EfficientNetDigit"])
     parser.add_argument("--purpose",  default="English",

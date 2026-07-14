@@ -89,6 +89,62 @@ class DigitCNN(nn.Module):
         return self.classifier(x)
 
 
+class LegacyDigitCNN(nn.Module):
+    """Original 2-conv architecture (pre-block/BatchNorm redesign).
+
+    Kept only so older checkpoints (state_dict keys: conv1, conv2, fc)
+    can still be loaded and exported. Do NOT use for new training —
+    use DigitCNN instead.
+
+    Input:  (B, 1, 28, 28)
+    Output: (B, num_classes) logits
+    """
+
+    def __init__(self, num_classes: int = 10):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.flatten = nn.Flatten()
+        self.dropout = nn.Dropout(p=0.5)
+        self.fc = nn.Linear(64 * 7 * 7, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.pool1(self.relu1(self.conv1(x)))
+        x = self.pool2(self.relu2(self.conv2(x)))
+        x = self.flatten(x)
+        x = self.dropout(x)
+        return self.fc(x)
+
+
+def load_digit_cnn_checkpoint(path: str, device, num_classes: int = 10):
+    """Load a DigitCNN checkpoint, falling back to LegacyDigitCNN if the
+    state_dict doesn't match the current architecture.
+
+    Returns (model, architecture_name) where architecture_name is
+    'DigitCNN' or 'LegacyDigitCNN'.
+    """
+    state_dict = torch.load(path, map_location=device)
+
+    model = DigitCNN(num_classes=num_classes).to(device)
+    try:
+        model.load_state_dict(state_dict)
+        model.eval()
+        return model, 'DigitCNN'
+    except RuntimeError:
+        pass
+
+    legacy = LegacyDigitCNN(num_classes=num_classes).to(device)
+    legacy.load_state_dict(state_dict)
+    legacy.eval()
+    return legacy, 'LegacyDigitCNN'
+
+
 class MultiTaskDigitCNN(nn.Module):
     """Shared 3-block backbone with two prediction heads.
 

@@ -127,10 +127,14 @@ def _render_config_form(device: torch.device) -> None:
     sel_col1, sel_col2 = st.columns(2)
     with sel_col1:
         model_choice = st.selectbox("Model", [
-            "DigitCNN", "MultiTaskCNN",
+            "DigitCNN", "LegacyDigitCNN", "MultiTaskCNN",
             "UnifiedCNN — MobileNetV3", "UnifiedCNN — ShuffleNetV2",
             "EfficientNetDigit",
-        ])
+        ], help=(
+            "DigitCNN: current 3-block BatchNorm architecture (recommended). "
+            "LegacyDigitCNN: original 2-conv architecture, kept for compatibility "
+            "with older checkpoints — lower capacity, not recommended for new training."
+        ))
     with sel_col2:
         purpose = st.selectbox("Purpose", ["English", "Persian", "Multi"])
 

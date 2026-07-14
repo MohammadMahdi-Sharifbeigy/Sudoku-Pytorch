@@ -195,7 +195,7 @@ def _train_loop(
 # ── Trainers ──────────────────────────────────────────────────────────────────
 
 def _run_singletask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
-    from src.model import DigitCNN, FocalLoss
+    from src.model import DigitCNN, LegacyDigitCNN, FocalLoss
     from src.data_utils import (
         get_dataloaders, get_dataloaders_all,
         get_dataloaders_mnist_hoda, get_dataloaders_mnist_only,
@@ -203,6 +203,8 @@ def _run_singletask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
     )
     from src.train import validate, collect_predictions
     from src.report_utils import save_training_report
+
+    ModelCls = LegacyDigitCNN if cfg.model_choice == "LegacyDigitCNN" else DigitCNN
 
     key = _map_dataset_to_loader_key(cfg.dataset_choice)
     if key == "all":
@@ -220,7 +222,7 @@ def _run_singletask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
     save_path = f"models/best_model_{label.lower()}.pt" if cfg.purpose in ("Persian", "English") else "models/best_model.pt"
     report_path = f"models/training_report_{label.lower()}.txt" if cfg.purpose in ("Persian", "English") else "models/training_report.txt"
 
-    model     = DigitCNN(num_classes=10).to(device)
+    model     = ModelCls(num_classes=10).to(device)
     criterion = FocalLoss(alpha=0.25, gamma=2.0)
     optimizer = _make_optimizer(model, cfg.learning_rate, cfg.weight_decay)
     scheduler = _make_scheduler(optimizer, cfg.lr_schedule, cfg.epochs, train_loader,
@@ -255,13 +257,15 @@ def _run_singletask(cfg: TrainingConfig, device, on_epoch, stop_event) -> dict:
 
 
 def _run_lang_specific(cfg: TrainingConfig, device, on_epoch, stop_event, is_persian: bool) -> dict:
-    from src.model import DigitCNN, FocalLoss
+    from src.model import DigitCNN, LegacyDigitCNN, FocalLoss
     from src.data_utils import (
         get_dataloaders_persian, get_dataloaders_english,
         build_train_transform_preset,
     )
     from src.train import validate, collect_predictions
     from src.report_utils import save_training_report
+
+    ModelCls = LegacyDigitCNN if cfg.model_choice == "LegacyDigitCNN" else DigitCNN
 
     if is_persian:
         train_loader, val_loader, test_loader = get_dataloaders_persian(cfg.data_path, batch_size=cfg.batch_size)
@@ -278,7 +282,7 @@ def _run_lang_specific(cfg: TrainingConfig, device, on_epoch, stop_event, is_per
 
     train_loader.dataset.transform = build_train_transform_preset(cfg.aug_preset)
 
-    model     = DigitCNN(num_classes=10).to(device)
+    model     = ModelCls(num_classes=10).to(device)
     criterion = FocalLoss(alpha=0.25, gamma=2.0)
     optimizer = _make_optimizer(model, cfg.learning_rate, cfg.weight_decay)
     scheduler = _make_scheduler(optimizer, cfg.lr_schedule, cfg.epochs, train_loader,
@@ -579,7 +583,7 @@ def run_training(
     if p == "English":
         return _run_singletask(config, device, on_epoch, stop_event)
 
-    # Multi + DigitCNN
+    # Multi + (DigitCNN or LegacyDigitCNN)
     if config.multi_mode and "Separate" in config.multi_mode:
         r_per = _run_lang_specific(config, device, on_epoch, stop_event, is_persian=True)
         r_eng = _run_lang_specific(config, device, on_epoch, stop_event, is_persian=False)

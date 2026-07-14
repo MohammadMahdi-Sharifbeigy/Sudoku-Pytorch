@@ -12,6 +12,7 @@ import torch
 from src.model import (
     DigitCNN, MultiTaskDigitCNN, UnifiedDigitCNN,
     decode_unified_class, UNIFIED_NUM_CLASSES,
+    load_digit_cnn_checkpoint,
 )
 from src.report_utils import save_inference_report
 from src.solver import SudokuSolver
@@ -345,6 +346,66 @@ def render_inference_page(device: torch.device) -> None:
     is_unified   = use_multimodel and selected_mt_key == 'unified'
     is_persian   = use_persian and not use_multimodel
 
+    # ── Manual ONNX model file picker (overrides auto-selection above) ─
+    manual_onnx_selected = False
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Manual ONNX Model")
+    models_dir = "models"
+    found_onnx = []
+    if os.path.isdir(models_dir):
+        found_onnx = sorted(
+            f for f in os.listdir(models_dir) if f.lower().endswith(".onnx")
+        )
+
+    manual_options = ["Auto (use selections above)"] + found_onnx
+    manual_choice = st.sidebar.selectbox(
+        "Pick a specific .onnx file from models/", manual_options, index=0,
+        help="Scans the models/ folder for any .onnx file. Selecting one "
+             "overrides the toggles above and forces ONNX inference.",
+    )
+
+    manual_onnx_selected = manual_choice != "Auto (use selections above)"
+    if manual_onnx_selected:
+        try:
+            import onnxruntime  # noqa
+        except ImportError:
+            st.sidebar.error("onnxruntime not installed — cannot use ONNX models.")
+            manual_onnx_selected = False
+
+    if manual_onnx_selected:
+        onnx_path  = os.path.join(models_dir, manual_choice)
+        use_onnx   = True
+        onnx_avail = True
+
+        # Guess model type from filename, but let the user override it.
+        _name_lower = manual_choice.lower()
+        if "unified" in _name_lower:
+            _guess = "Unified 20-class"
+        elif "multitask" in _name_lower or "multi_task" in _name_lower or "mt" in _name_lower:
+            _guess = "Multi-task (digit + language)"
+        else:
+            _guess = "Standard (digit only)"
+
+        type_options = ["Standard (digit only)", "Multi-task (digit + language)", "Unified 20-class"]
+        model_type = st.sidebar.radio(
+            "Model type for selected file", type_options,
+            index=type_options.index(_guess),
+            help="Determines how outputs are decoded. Auto-guessed from the filename.",
+        )
+
+        is_multitask = model_type == "Multi-task (digit + language)"
+        is_unified   = model_type == "Unified 20-class"
+        is_persian   = False
+
+        if is_unified:
+            unified_bb = st.sidebar.selectbox(
+                "Backbone (must match training)",
+                ["mobilenet_v3_small", "shufflenet_v2_x0_5"],
+                key="manual_unified_bb",
+            )
+
+        st.sidebar.caption(f"Selected file: `{onnx_path}`")
+
     # ── Sidebar: preprocessing ────────────────────────────────────────
     st.sidebar.markdown("---")
     active_preprocess, preprocess_dirty = render_preprocess_sidebar()
@@ -398,7 +459,13 @@ def render_inference_page(device: torch.device) -> None:
             img = resize_and_maintain_aspect_ratio(input_image=img, new_width=1000)
 
             # Load model
-            if use_onnx and onnx_avail:
+            if manual_onnx_selected:
+                model        = OnnxInferenceSession(onnx_path)
+                vision_model = model
+                _lbl = ("multi-task" if is_multitask else
+                        "unified-20" if is_unified else "standard")
+                st.sidebar.success(f"ONNX (manual) · {os.path.basename(onnx_path)} · {_lbl}")
+            elif use_onnx and onnx_avail:
                 model        = OnnxInferenceSession(onnx_path)
                 vision_model = model
                 _lbl = ("multi-task" if is_multitask else
@@ -421,11 +488,11 @@ def render_inference_page(device: torch.device) -> None:
                 vision_model = DigitOnlyModelWrapper(_pt)
                 st.sidebar.info("PyTorch · multi-task")
             elif is_persian and os.path.exists(_MODEL_PATHS['persian_pt']):
-                model = DigitCNN(num_classes=10).to(device)
-                model.load_state_dict(torch.load(_MODEL_PATHS['persian_pt'], map_location=device))
-                model.eval()
+                model, _arch = load_digit_cnn_checkpoint(
+                    _MODEL_PATHS['persian_pt'], device, num_classes=10)
                 vision_model = model
-                st.sidebar.info("PyTorch · Persian (Hoda)")
+                _tag = " (legacy arch)" if _arch == 'LegacyDigitCNN' else ""
+                st.sidebar.info(f"PyTorch · Persian (Hoda){_tag}")
             else:
                 eng_pt = (_MODEL_PATHS['english_pt']
                           if os.path.exists(_MODEL_PATHS['english_pt'])
@@ -433,11 +500,10 @@ def render_inference_page(device: torch.device) -> None:
                 if not os.path.exists(eng_pt):
                     st.error("No trained model found. Go to **Model Training** to train one.")
                     st.stop()
-                model = DigitCNN(num_classes=10).to(device)
-                model.load_state_dict(torch.load(eng_pt, map_location=device))
-                model.eval()
+                model, _arch = load_digit_cnn_checkpoint(eng_pt, device, num_classes=10)
                 vision_model = model
-                st.sidebar.info("PyTorch · English (default)")
+                _tag = " (legacy arch)" if _arch == 'LegacyDigitCNN' else ""
+                st.sidebar.info(f"PyTorch · English (default){_tag}")
 
             img_original = img.copy()
             if enable_sharpen:
