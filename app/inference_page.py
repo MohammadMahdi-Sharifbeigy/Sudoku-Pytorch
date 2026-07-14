@@ -203,40 +203,6 @@ def _render_debug_steps(img, img_original, enable_sharpen, use_nlm, sharpen_cent
                         _lbl  = threshold_combo_label(_idx + _off, (_bs, _c))
                         st.markdown(f"**{'Selected - ' if _sel else ''}{_lbl}**")
                         st.image(_t, width='stretch', channels="GRAY")
-        st.markdown("---")
-
-        st.markdown("#### Step 3 — Perspective Transform")
-        if board_image is not None:
-            h_b, w_b = board_image.shape[:2]
-            c3a, c3b = st.columns(2)
-            with c3a:
-                st.caption(f"Warped size: {w_b}×{h_b} px | Pipeline: `{pipeline_name}`")
-                st.image(board_image, width='stretch',
-                         channels="GRAY" if len(board_image.shape) == 2 else "RGB")
-            with c3b:
-                st.caption(f"Mode: `{grid_combo_mode}`")
-        else:
-            st.warning("No warped grid available.")
-        st.markdown("---")
-
-        st.markdown("#### Step 4 — Cell Extraction")
-        if cells is not None:
-            _nd = sum(c['contains_digit'] for c in cells)
-            _nc = len(cells)
-            c4a, c4b = st.columns(2)
-            with c4a:
-                st.caption(
-                    f"Cells: **{_nc}/81** | Digits: **{_nd}** | Empty: **{_nc - _nd}**  \n"
-                    f"area_threshold: **{area_thresh}%** | "
-                    f"Erode: `{'on' if erode_enabled else 'off'}` "
-                    f"contour `{erode_kernel_size}×{erode_kernel_size} ×{erode_iterations}` "
-                    f"slice `{slice_erode_kernel_size}×{slice_erode_kernel_size} ×{slice_erode_iterations}`"
-                )
-            with c4b:
-                _fig = plot_cell_images_in_grid(cells)
-                st.pyplot(_fig); plt.close(_fig)
-        else:
-            st.warning("No cells extracted.")
 
 
 def _render_cell_grid(cells, per_cell, is_multitask, is_unified):

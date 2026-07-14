@@ -49,7 +49,7 @@ PREPROCESS_DEFAULTS = {
     "thresh_method":           "mean",
     "thresh_bs":               _DEFAULT_COMBO_BS,
     "thresh_c":                _DEFAULT_COMBO_C,
-    "area_thresh":             4.0,
+    "area_thresh":             3.5,
     "grid_combo_text":         format_threshold_combos(DEFAULT_GRID_THRESHOLD_COMBOS),
     "selected_grid_combo_label": threshold_combo_label(0, DEFAULT_GRID_THRESHOLD_COMBOS[0]),
     "grid_combo_mode":         "Use selected combo only",

@@ -19,7 +19,7 @@ def _check_stop(should_stop):
         should_stop()
 
 
-DEFAULT_GRID_THRESHOLD_COMBOS = [(31, 6), (21, 5), (11, 3), (61, 10), (41, 8), (81, 12)]
+DEFAULT_GRID_THRESHOLD_COMBOS = [(31, 6), (21, 5), (11, 6), (61, 10), (41, 8), (81, 12)]
 DEFAULT_CELL_THRESHOLD_COMBOS = [(91, 7), (51, 5), (71, 9), (31, 4), (111, 10), (41, 6)]
 
 
