@@ -241,8 +241,11 @@ class MultitaskAugmentedDataset(Dataset):
 
 
 def _make_loader(ds: Dataset, batch_size: int, shuffle: bool) -> DataLoader:
+    # num_workers=0: multiprocessing spawn fails to pickle AugmentedDataset when
+    # running inside a background thread (Windows spawn context). Single-threaded
+    # loading is fast enough given training is already threaded.
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
-                      num_workers=2, pin_memory=torch.cuda.is_available())
+                      num_workers=0, pin_memory=False)
 
 
 def _make_loaders(x_train, y_train, x_val, y_val, x_test, y_test,
